@@ -919,6 +919,22 @@ input,select{font:inherit;color:inherit}
   body.gv-phone .product-grid{max-height:none;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:7px}
 }
 
+/* Phone checkout: keep the receipt and its payment controls in view. */
+@media(max-width:980px){
+  body.gv-phone .main{top:50px;bottom:0;overflow:hidden;padding:8px 10px 0}
+  body.gv-phone #view-pos.active{height:100%;min-height:0}
+  body.gv-phone .pos-layout{height:100%;min-height:0;display:flex;flex-direction:column;align-items:stretch;gap:6px;padding:0}
+  body.gv-phone .pos-catalog{position:relative;align-self:stretch;flex:0 0 auto;overflow:visible}
+  body.gv-phone .pos-toolbar{position:static;margin:0;padding:0}
+  body.gv-phone .matches-list:not([hidden]){position:absolute;top:100%;left:0;right:0;z-index:45;max-height:min(40vh,320px)!important;overflow-y:auto!important;background:var(--bg);padding:6px;box-shadow:var(--sh);border-radius:10px}
+  body.gv-phone .empty-search:not([hidden]){position:absolute;top:100%;left:0;right:0;z-index:45;background:var(--bg);box-shadow:var(--sh);border-radius:10px}
+  body.gv-phone .pos-cart{position:static;flex:1 1 0;min-height:0;max-height:none;margin:0;overflow:hidden}
+  body.gv-phone .cart-items{flex:1 1 0;min-height:0;max-height:none;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  body.gv-phone .cart-summary{flex:0 0 auto;padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+  body.gv-phone .chk-row{position:static;box-shadow:none}
+  body.gv-phone .split-box:not([hidden]){display:block!important}
+}
+
 
 
 
@@ -1913,6 +1929,13 @@ function renderProductGrid(){
   const grid = document.getElementById('productGrid');
   const empty = document.getElementById('emptySearch');
 
+  if(document.body.classList.contains('gv-phone') && !q){
+    grid.innerHTML = '';
+    empty.hidden = true;
+    renderMatchList([]);
+    return;
+  }
+
   // категория «Услуги» или поиск по названию услуги — показываем только услуги
   const svcMatches = SERVICES.filter(x=> !q || x.name.toLowerCase().includes(q));
   const showSvc = activeCat==='Услуги' ? svcMatches.length > 0
@@ -1983,16 +2006,6 @@ function renderMatchList(list){
   document.body.classList.toggle('gv-searching', searching);
   const phone = document.body.classList.contains('gv-phone');
   if(!searching){
-    /* телефон (режим кассы): без поиска товары всё равно показаны строками —
-       сетки плиток там больше нет. На компьютере подсказку не показываем. */
-    if(phone && list && list.length){
-      box.hidden = false;
-      const total = (typeof DB!=='undefined' && Array.isArray(DB.products)) ? DB.products.length : list.length;
-      box.innerHTML = '<div class="m-hint">Всего товаров: <b>' + total + '</b> · начните вводить название или артикул</div>'
-        + renderMatchRows(list);
-      bindMatchRows(box);
-      return;
-    }
     box.hidden = true; box.innerHTML = ''; return;
   }
   if(!list || !list.length){ box.hidden = true; box.innerHTML = ''; return; }
@@ -2023,7 +2036,13 @@ function renderMatchRows(list){
 
 function bindMatchRows(box){
   box.querySelectorAll('.m-row').forEach(row=>{
-    row.onclick = ()=> addToCart(row.dataset.id);
+    row.onclick = ()=>{
+      addToCart(row.dataset.id);
+      if(document.body.classList.contains('gv-phone')){
+        document.getElementById('posSearch').value = '';
+        renderProductGrid();
+      }
+    };
   });
 }
 
