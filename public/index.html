@@ -4635,7 +4635,9 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     const deleted = (server.sales||[]).filter(s=>s.deleted && !byId[String(s.id)]);
     const salesOut = sales.concat(lost, deleted);
     return Object.assign({}, server, {
-      products: (server.products||[]).length ? server.products : (srvEmpty ? (local.products||[]) : []),
+      // товары с сервера главные: их ведёт общая база.
+      // Но пока сервер пустой, а браузер уже загрузился — ждём загрузки, не стираем.
+      products: (server.products||[]).length ? server.products : ((typeof DB !== 'undefined' && DB && (DB.products||[]).length) ? (DB.products||[]) : (srvEmpty ? (local.products||[]) : [])),
       customers: (server.customers||[]).length ? server.customers : (srvEmpty ? (local.customers||[]) : []),
       sales: salesOut,
       counter: Math.max(+server.counter||1001, +local.counter||1001)
@@ -4765,10 +4767,16 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     loadStaffPasses();
     // любой продавец со своего логина: сначала отправляем свои чеки, затем служебные данные
     if(role !== 'admin') return pushSales();
-    return api('PUT', '/api/data', {db: DB}).then(o=>{
-      if(o.ok){ rev = o.rev || rev; lastOk = Date.now(); paint('ok'); }
-      else if(o.__status >= 500){ setOffline(); }
-      return !!o.ok;
+    /* Чеки уходят по одному, а товары — целым пакетом. Поэтому сначала чеки:
+       если с телефона ушла бы вся база раньше чеков, чек мог потеряться.
+       Ассортимент отправляем следующим шагом, уже после того как чеки приняты. */
+    return pushSales().then(okSales=>{
+      if(!okSales) return false;
+      return api('PUT', '/api/data', {db: DB}).then(o=>{
+        if(o.ok){ rev = o.rev || rev; lastOk = Date.now(); paint('ok'); }
+        else if(o.__status >= 500){ setOffline(); }
+        return !!o.ok;
+      });
     }).catch(()=>{ setOffline(); return false; });
   }
 
