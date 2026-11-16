@@ -1,0 +1,19 @@
+# Настройки для хостинга Render (render.com). Просто подключите папку проекта.
+services:
+  - type: web
+    name: greenville-kassa
+    runtime: node
+    plan: starter            # платный тариф — сервис не «засыпает»
+    region: frankfurt
+    buildCommand: "echo сборка не нужна"
+    startCommand: "node server.js"
+    healthCheckPath: /api/who
+    envVars:
+      - key: ADMIN_PASSWORD
+        sync: false          # свой пароль первого запуска, вводится в панели
+      - key: DATA_DIR
+        value: /data
+    disk:
+      name: greenville-data
+      mountPath: /data
+      sizeGB: 1

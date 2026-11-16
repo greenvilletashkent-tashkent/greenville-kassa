@@ -1,0 +1,473 @@
+/*
+  Greenville POS — общий сервер для нескольких устройств.
+  Без внешних библиотек: только Node.js 18+.
+
+  Запуск локально (в магазине, без интернета):
+    node server.js
+    → открыть http://localhost:8080
+
+  Запуск в облаке:
+    PORT и DATA_DIR задаёт хостинг; ADMIN_PASSWORD — свой пароль администратора.
+*/
+'use strict';
+
+const http = require('http');
+const fs   = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+/* ---------- настройки ---------- */
+const DIR      = __dirname;
+const PUBLIC   = path.join(DIR, 'public');
+/* Постоянный диск в облаке: если хостинг дал отдельную папку для данных —
+   кладём базу туда, иначе она пропадёт при перезапуске. */
+function pickDataDir(){
+  if(process.env.DATA_DIR) return process.env.DATA_DIR;
+  const cands = ['/data', '/var/data', '/mnt/data', path.join(DIR, 'data')];
+  for(const d of cands){
+    try{
+      if(d === path.join(DIR, 'data')) return d;
+      const st = fs.statSync(d);
+      if(st.isDirectory()){ fs.accessSync(d, fs.constants.W_OK); return d; }
+    }catch(e){}
+  }
+  return path.join(DIR, 'data');
+}
+const DATA_DIR = pickDataDir();
+const PORT     = +(process.env.PORT || 8080);
+const HOST     = process.env.HOST || '0.0.0.0';
+const FILE_DB   = path.join(DATA_DIR, 'db.json');
+const FILE_AUTH = path.join(DATA_DIR, 'staff.json');
+const FILE_RATE = path.join(DATA_DIR, 'rate.json');
+const FILE_LOG  = path.join(DATA_DIR, 'changes.log');
+const FILE_SESS = path.join(DATA_DIR, 'sessions.json');
+
+/* пароль администратора для первого входа: только из окружения (не из .env-файла) */
+const CLOUD_PASS = String(process.env.ADMIN_PASSWORD || '').trim();
+
+function ensureDirs(){
+  fs.mkdirSync(DATA_DIR, {recursive:true});
+}
+ensureDirs();
+
+/* ---------- тот же хэш пароля, что и в кассе ---------- */
+function hashPass(str){
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  const s = 'gv:' + String(str);
+  for(let i=0;i<s.length;i++){
+    h1 ^= s.charCodeAt(i); h1 = (h1 * 16777619) >>> 0;
+    h2 = ((h2 + s.charCodeAt(i)) * 31 + (h1 >>> 8)) >>> 0;
+  }
+  return (h1.toString(36) + h2.toString(36));
+}
+
+/* ---------- файлы данных ---------- */
+function readJson(file, def){
+  try{ return JSON.parse(fs.readFileSync(file,'utf8')); }catch(e){ return def; }
+}
+/* запись через временный файл: диск в облаке может отваливаться,
+   поэтому пробуем несколько раз, а при полном отказе — не падаем */
+function writeJsonAtomic(file, obj, tries){
+  tries = tries || 4;
+  for(let a=1;a<=tries;a++){
+    try{ return writeJsonOnce(file, obj); }
+    catch(e){
+      if(a === tries){ console.error('Не удалось сохранить ' + path.basename(file) + ': ' + e.message); return false; }
+      const until = Date.now() + 40*a;
+      while(Date.now() < until){}
+    }
+  }
+}
+function writeJsonOnce(file, obj){
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(obj));
+  fs.renameSync(tmp, file);
+}
+
+let DB   = readJson(FILE_DB, null);
+let AUTH = readJson(FILE_AUTH, null);
+if(!DB)   DB   = {products:[], customers:[], sales:[], counter:1001, bonusPct:5};
+if(!AUTH) AUTH = {staff:[]};
+let REV = 0;
+let dbDirty = false;
+
+function saveDb(){ dbDirty = true; writeJsonAtomic(FILE_DB, DB); dbDirty = false; }
+function saveAuth(){ writeJsonAtomic(FILE_AUTH, AUTH); }
+/* Товары с телефонов объединяем по id: новый добавляем, существующий
+   принимаем только если он изменён позже, чем лежит на сервере.
+   Иначе телефон с устаревшей базой стирал товары, заведённые с другого. */
+function mergeProducts(list){
+  if(!Array.isArray(DB.products)) DB.products = [];
+  const idx = new Map(DB.products.map((p,i)=>[String(p&&p.id), i]));
+  list.forEach(p=>{
+    if(!p || !p.id) return;
+    const i = idx.get(String(p.id));
+    if(i === undefined){ idx.set(String(p.id), DB.products.length); DB.products.push(p); return; }
+    const cur = DB.products[i] || {};
+    const ct = Date.parse(cur.updatedAt || cur.changedAt || 0);
+    const nt = Date.parse(p.updatedAt || p.changedAt || 0);
+    if(nt && (!ct || nt > ct)) DB.products[i] = p;
+    else if(!nt && !ct) DB.products[i] = p;
+  });
+}
+
+function bump(){ REV++; saveDb(); }
+
+/* ---------- сессии в памяти ---------- */
+const sessions = new Map();   // token -> {id, login, role, name, at}
+const TTL = 1000*60*60*24*30;
+
+function normPhone(v){ return String(v||'').replace(/\D/g,''); }
+function toPhone(v){ let d = normPhone(v); if(d.length===9) d = '998'+d; return d; }
+
+function findStaff(login){
+  const raw = String(login||'').trim();
+  const list = Array.isArray(AUTH.staff) ? AUTH.staff : [];
+  let u = list.find(x=> String(x.login).toLowerCase() === raw.toLowerCase());
+  if(u) return u;
+  const tel = toPhone(raw);
+  if(/^998[0-9]{9}$/.test(tel)) u = list.find(x=> normPhone(x.login) === tel);
+  return u || null;
+}
+
+function saveSessions(){
+  const out = {};
+  const now = Date.now();
+  for(const [k,v] of sessions){ if(now - v.at <= TTL) out[k] = v; }
+  writeJsonAtomic(FILE_SESS, out);
+}
+function loadSessions(){
+  const o = readJson(FILE_SESS, {});
+  const now = Date.now();
+  for(const k of Object.keys(o || {})){
+    const v = o[k];
+    if(v && now - (v.at||0) <= TTL) sessions.set(k, v);
+  }
+}
+function issue(u){
+  const t = crypto.randomBytes(24).toString('hex');
+  sessions.set(t, {id:u.id, login:u.login, role:u.role, name:u.name, at:Date.now()});
+  try{ saveSessions(); }catch(e){}
+  return t;
+}
+function who(req){
+  const h = req.headers['authorization'] || '';
+  const t = h.startsWith('Bearer ') ? h.slice(7) : '';
+  const s = sessions.get(t);
+  if(!s) return null;
+  if(Date.now() - s.at > TTL){ sessions.delete(t); try{ saveSessions(); }catch(e){} return null; }
+  // раз в час продлеваем отметку на диске, чтобы перезапуск сервиса не выбивал из кассы
+  if(Date.now() - s.at > 3600*1000){ s.at = Date.now(); try{ saveSessions(); }catch(e){} }
+  return s;
+}
+
+try{ loadSessions(); }catch(e){ console.error('сессии', e.message); }
+
+/* ---------- защита от подбора пароля ---------- */
+let rate = readJson(FILE_RATE, {});
+function rateKey(req){ return (req.headers['x-forwarded-for']||'').split(',')[0].trim() || req.socket.remoteAddress || 'local'; }
+function rateCheck(k){
+  const r = rate[k];
+  if(!r) return true;
+  if(Date.now() - r.t > 1000*60*10){ delete rate[k]; return true; }
+  return r.n < 12;
+}
+// небольшая задержка на неверный пароль — чтобы не подбирали перебором
+function waitAFew(){ const t = Date.now()+450; while(Date.now()<t){} }
+function rateFail(k){
+  const r = rate[k] || {n:0, t:Date.now()};
+  if(Date.now() - r.t > 1000*60*10){ r.n = 0; r.t = Date.now(); }
+  r.n++; rate[k] = r;
+  try{ writeJsonAtomic(FILE_RATE, rate); }catch(e){}
+}
+function rateOk(k){ if(rate[k]){ delete rate[k]; try{ writeJsonAtomic(FILE_RATE, rate); }catch(e){} } }
+
+/* ---------- журнал изменений (кто что изменил) ---------- */
+function logChange(actor, kind, info){
+  const line = JSON.stringify({at:new Date().toISOString(), who:(actor&&actor.login)||'-', kind, info:info||''}) + '\n';
+  try{ fs.appendFileSync(FILE_LOG, line); }catch(e){}
+}
+
+/* ---------- утилиты ответов ---------- */
+function cors(){
+  return {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization,content-type','Access-Control-Allow-Methods':'GET,POST,PUT,OPTIONS'};
+}
+function json(res, code, obj){
+  res.writeHead(code, Object.assign({'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}, cors()));
+  res.end(JSON.stringify(obj));
+}
+function readBody(req, limit){
+  return new Promise((resolve, reject)=>{
+    let size = 0; const chunks = [];
+    req.on('data', c=>{ size += c.length; if(size > (limit||8*1024*1024)){ reject(new Error('too large')); req.destroy(); return; } chunks.push(c); });
+    req.on('end', ()=>{ try{ resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); }catch(e){ reject(new Error('bad json')); } });
+    req.on('error', reject);
+  });
+}
+
+/* ---------- статика ---------- */
+const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.webp':'image/webp','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon','.woff2':'font/woff2','.txt':'text/plain; charset=utf-8','.md':'text/plain; charset=utf-8'};
+function serveFile(res, file){
+  fs.stat(file, (err, st)=>{
+    if(err || !st.isFile()){ res.writeHead(404, {'Content-Type':'text/plain; charset=utf-8'}); res.end('Не найдено'); return; }
+    const ext = path.extname(file).toLowerCase();
+    res.writeHead(200, {'Content-Type': MIME[ext] || 'application/octet-stream', 'Content-Length': st.size, 'Cache-Control': ext==='.html' ? 'no-cache' : 'public, max-age=3600'});
+    fs.createReadStream(file).pipe(res);
+  });
+}
+function safeJoin(root, urlPath){
+  const clean = decodeURIComponent(urlPath.split('?')[0]).replace(/\/+$/,'') || '/';
+  const full = path.normalize(path.join(root, clean));
+  return full.startsWith(root) ? full : null;
+}
+
+/* ---------- сервер ---------- */
+const server = http.createServer(async (req, res)=>{
+  const url = req.url || '/';
+  const p = url.split('?')[0];
+
+  if(req.method === 'OPTIONS'){ res.writeHead(204, cors()); return res.end(); }
+
+  try{
+    if(url.indexOf('/api/health') === 0) return json(res, 200, {ok:true, app:'greenville-pos', ver:1, rev:REV, staff:(AUTH.staff||[]).length, at:new Date().toISOString()});
+
+    /* --- вход --- */
+    if(p === '/api/login' && req.method === 'POST'){
+      const k = rateKey(req);
+      if(!rateCheck(k)) return json(res, 429, {ok:false, msg:'Слишком много попыток. Подождите 10 минут'});
+      const b = await readBody(req, 4096);
+      const login = String(b.login||'').trim();
+      const pass  = String(b.pass||'');
+      if(!login || !pass) return json(res, 400, {ok:false, msg:'Введите логин и пароль'});
+
+      /* первый запуск в облаке: сотрудников ещё нет, но задан пароль администратора */
+      if(!(AUTH.staff||[]).length && CLOUD_PASS && pass === CLOUD_PASS){
+        rateOk(k);
+        const nm = String(b.name || '').trim();
+        const admin = {id:'u1', login:(login.toLowerCase()==='admin' ? 'admin' : login.toLowerCase().replace(/\s+/g,'')),
+                       name: nm || 'Администратор', role:'admin', active:true, pass: hashPass(CLOUD_PASS), created:new Date().toISOString()};
+        AUTH.staff = [admin]; saveAuth();
+        const token = issue(admin);
+        logChange(admin, 'login', 'первый вход в облако');
+        return json(res, 200, {ok:true, token, id:admin.id, login:admin.login, role:admin.role, name:admin.name, serverHash: admin.pass});
+      }
+
+      // 1) сотрудник, заведённый в кассе (добавлен администратором на сервере)
+      const u = findStaff(login);
+      if(u){
+        if(!u.active) return json(res, 403, {ok:false, msg:'Доступ закрыт. Обратитесь к администратору'});
+        if(u.pass !== hashPass(pass)){ rateFail(k); waitAFew(); return json(res, 401, {ok:false, msg:'Неверный пароль'}); }
+        rateOk(k);
+        const token = issue(u);
+        logChange(u, 'login', '');
+        return json(res, 200, {ok:true, token, id:u.id, login:u.login, role:u.role, name:u.name, serverHash: u.pass});
+      }
+      rateFail(k);
+      waitAFew();
+      return json(res, 401, {ok:false, msg:'Такого логина нет или неверный пароль'});
+    }
+
+    /* --- выход --- */
+    if(p === '/api/logout' && req.method === 'POST'){
+      const h = req.headers['authorization'] || '';
+      if(h.startsWith('Bearer ')){ sessions.delete(h.slice(7)); try{ saveSessions(); }catch(e){} }
+      return json(res, 200, {ok:true});
+    }
+
+    /* --- создать первого администратора, если его ещё нет --- */
+    if(p === '/api/setup' && req.method === 'POST'){
+      if(!CLOUD_PASS) return json(res, 400, {ok:false, msg:'Не задан пароль для первого запуска'});
+      if((AUTH.staff||[]).length) return json(res, 409, {ok:false, msg:'Сотрудники уже заведены'});
+      const b = await readBody(req, 4096);
+      const k = rateKey(req);
+      if(!rateCheck(k)) return json(res, 429, {ok:false, msg:'Слишком много попыток. Подождите 10 минут'});
+      if(String(b.pass||'') !== CLOUD_PASS){ rateFail(k); waitAFew(); return json(res, 401, {ok:false, msg:'Неверный пароль первого запуска'}); }
+      rateOk(k);
+      const login = String(b.login||'admin').toLowerCase().replace(/\s+/g,'') || 'admin';
+      const name = String(b.name||'').trim() || 'Администратор';
+      const admin = {id:'u1', login, name, role:'admin', active:true, pass: hashPass(CLOUD_PASS), created:new Date().toISOString()};
+      AUTH.staff = [admin]; saveAuth();
+      const token = issue(admin);
+      logChange(admin, 'setup', 'первый администратор');
+      return json(res, 200, {ok:true, token, id:admin.id, login:admin.login, role:admin.role, name:admin.name, serverHash: admin.pass});
+    }
+
+    /* --- есть ли сотрудники: касса спрашивает это до входа, чтобы показать «первый вход» --- */
+    if(p === '/api/who' && req.method === 'GET'){
+      return json(res, 200, {ok:true, firstRun: !(AUTH.staff||[]).length, canCreate: !!CLOUD_PASS, count:(AUTH.staff||[]).length});
+    }
+
+    const me = who(req);
+    if(p.startsWith('/api/') && !me) return json(res, 401, {ok:false, msg:'Нужно войти'});
+
+    /* --- вся база --- */
+    if(url.indexOf('/api/data') === 0 && req.method === 'GET'){
+      return json(res, 200, {ok:true, rev:REV, at:new Date().toISOString(), db:DB, staff:(AUTH.staff||[]).map(x=>({id:x.id, login:x.login, name:x.name, role:x.role, active:x.active, created:x.created}))});
+    }
+
+    /* --- сохранить всю базу --- */
+    if(p === '/api/data' && req.method === 'PUT'){
+      if(me.role !== 'admin') return json(res, 403, {ok:false, msg:'Изменять данные может администратор'});
+      const b = await readBody(req, 32*1024*1024);
+      const db = b.db;
+      if(!db || typeof db !== 'object') return json(res, 400, {ok:false, msg:'Пустые данные'});
+      db.products = Array.isArray(db.products) ? db.products : [];
+      db.customers = Array.isArray(db.customers) ? db.customers : [];
+      db.sales = Array.isArray(db.sales) ? db.sales : [];
+      if(!db.counter) db.counter = 1001;
+      DB = db; bump();
+      logChange(me, 'save', 'товаров '+db.products.length+', чеков '+db.sales.length);
+      return json(res, 200, {ok:true, rev:REV});
+    }
+
+    /* --- чеки: по одному, можно и изменить, и удалить ---
+       Чек не перезаписывается «вслепую»: берём тот, что пришёл с устройства,
+       и заменяем версию на сервере (так правка и пометка «удалён» видны всем). */
+    if(p === '/api/sale' && req.method === 'POST'){
+      const b = await readBody(req, 4*1024*1024);
+      const s = b.sale;
+      if(!s || !s.id) return json(res, 400, {ok:false, msg:'Пустой чек'});
+      if(!Array.isArray(DB.sales)) DB.sales = [];
+      const idx = DB.sales.findIndex(x=> String(x.id) === String(s.id));
+      const prev = idx >= 0 ? DB.sales[idx] : null;
+      // более старую версию (по времени правки) не затираем более новой
+      const pt = prev ? Date.parse(prev.updatedAt || prev.date || 0) : 0;
+      const st = Date.parse(s.updatedAt || s.date || 0);
+      if(prev && pt > st + 1000) return json(res, 200, {ok:true, rev:REV, skipped:true, sale:prev});
+      // номер уже занят чужим чеком (другое устройство выдало такой же) — выдаём свободный
+      if(!prev && DB.sales.some(x=> String(x.id) === String(s.id))){
+        DB.counter = Math.max(+DB.counter||1001, 1001) + 1;
+        s.id = String(DB.counter);
+      }
+      const i2 = DB.sales.findIndex(x=> String(x.id) === String(s.id));
+      if(i2 >= 0) DB.sales[i2] = s; else DB.sales.push(s);
+      DB.counter = Math.max(+DB.counter||1001, (+s.id||0) + 1);
+      bump();
+      logChange(me, 'sale', '#' + s.id + (s.deleted ? ' удалён' : s.paid ? ' оплачен' : ' отложен'));
+      return json(res, 200, {ok:true, rev:REV, sale:s});
+    }
+
+    /* --- только новые чеки (старый вариант, оставлен для совместимости) --- */
+    if(p === '/api/push' && req.method === 'POST'){
+      const b = await readBody(req, 4*1024*1024);
+      const sales = Array.isArray(b.sales) ? b.sales : [];
+      const have = new Set((DB.sales||[]).map(s=>String(s.id)));
+      let added = 0;
+      for(const s of sales){ if(s && !have.has(String(s.id))){ DB.sales.push(s); added++; } }
+      DB.counter = Math.max(+DB.counter||1001, +b.counter||0);
+      if(added) bump(); else saveDb();
+      if(added) logChange(me, 'push', 'чеков '+added);
+      return json(res, 200, {ok:true, rev:REV, added});
+    }
+
+    /* --- номер нового чека ---
+       У каждого телефона свой счётчик, поэтому номер выдаёт облако:
+       два продавца одновременно не получат одинаковый номер. */
+    if(p === '/api/nextid' && req.method === 'POST'){
+      DB.counter = Math.max(+DB.counter||1001, 1001) + 1;
+      saveDb();
+      return json(res, 200, {ok:true, counter:DB.counter, rev:REV});
+    }
+
+    /* --- правка ассортимента и настроек с любого логина ---
+       Продавец тоже может добавить товар или изменить цену; данные сразу у всех. */
+    if(p === '/api/edit' && req.method === 'POST'){
+      const b = await readBody(req, 16*1024*1024);
+      const m = b.meta || {};
+      if(Array.isArray(m.products)) mergeProducts(m.products);
+      if(Array.isArray(m.customers)) DB.customers = m.customers;
+      if(m.counter) DB.counter = Math.max(+DB.counter||1001, +m.counter||0);
+      if(m.bonusPct != null) DB.bonusPct = +m.bonusPct || 5;
+      bump();
+      logChange(me, 'edit', 'товаров ' + (DB.products||[]).length);
+      return json(res, 200, {ok:true, rev:REV});
+    }
+
+    /* --- обновить только служебные данные (клиенты, скидка, счётчик) --- */
+    if(p === '/api/meta' && req.method === 'POST'){
+      const b = await readBody(req, 8*1024*1024);
+      if(Array.isArray(b.customers)) DB.customers = b.customers;
+      if(b.counter) DB.counter = Math.max(+DB.counter||1001, +b.counter||0);
+      if(b.bonusPct != null) DB.bonusPct = +b.bonusPct || 5;
+      bump();
+      logChange(me, 'meta', 'клиентов ' + (DB.customers||[]).length);
+      return json(res, 200, {ok:true, rev:REV});
+    }
+
+    /* --- пароли сотрудников: чтобы вход работал и без интернета --- */
+    if(p === '/api/passes' && req.method === 'GET'){
+      return json(res, 200, {ok:true, staff:(AUTH.staff||[]).map(x=>({id:x.id, login:x.login, name:x.name, role:x.role, active:x.active, created:x.created, pass:x.pass}))});
+    }
+
+    /* --- сотрудники: список с паролями (только админ) --- */
+    if(p === '/api/staff' && req.method === 'GET'){
+      if(me.role !== 'admin') return json(res, 403, {ok:false, msg:'Только администратор'});
+      return json(res, 200, {ok:true, staff:AUTH.staff||[]});
+    }
+    if(p === '/api/staff' && req.method === 'PUT'){
+      if(me.role !== 'admin') return json(res, 403, {ok:false, msg:'Только администратор'});
+      const b = await readBody(req, 512*1024);
+      const list = Array.isArray(b.staff) ? b.staff : [];
+      const before = new Map((AUTH.staff||[]).map(x=>[String(x.id), x]));
+      const out = [];
+      for(const x of list){
+        if(!x || !x.login) continue;
+        const login = String(x.login).trim().toLowerCase();
+        const old = before.get(String(x.id));
+        // пароль: если пришёл прежний хэш — оставляем как есть; если новый — сохраняем
+        const pass = (x.pass && x.pass !== (old && old.pass)) ? x.pass : ((old && old.pass) || x.pass || '');
+        if(!pass) continue;                        // без пароля сотрудник не сможет войти
+        out.push({id:String(x.id), login, name:String(x.name||login).trim(), role:(x.role==='admin'?'admin':'cashier'),
+                  active:x.active !== false, pass, created:x.created || new Date().toISOString()});
+      }
+      // не даём остаться без администратора
+      if(!out.some(x=>x.role==='admin')) return json(res, 400, {ok:false, msg:'Должен остаться хотя бы один администратор'});
+      AUTH.staff = out;
+      saveAuth();
+      logChange(me, 'staff', 'сотрудников '+AUTH.staff.length);
+      return json(res, 200, {ok:true, staff:AUTH.staff.length});
+    }
+
+    /* --- кто сейчас работает --- */
+    if(p === '/api/online' && req.method === 'GET'){
+      const now = Date.now();
+      const list = [...sessions.values()].filter(s=> now - s.at < 1000*60*10).map(s=>({name:s.name, login:s.login, role:s.role, at:new Date(s.at).toISOString()}));
+      return json(res, 200, {ok:true, online:list});
+    }
+
+    /* --- резервная копия базы --- */
+    if(p === '/api/backup' && req.method === 'GET'){
+      if(me.role !== 'admin') return json(res, 403, {ok:false});
+      const name = 'greenville-backup-' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-') + '.json';
+      res.writeHead(200, Object.assign({'Content-Type':'application/json; charset=utf-8','Content-Disposition':'attachment; filename="'+name+'"'}, cors()));
+      return res.end(JSON.stringify({app:'greenville-pos', ver:2, at:new Date().toISOString(), auth:AUTH, db:DB}, null, 1));
+    }
+
+    if(p.startsWith('/api/')) return json(res, 404, {ok:false, msg:'Неизвестный запрос'});
+
+    /* --- страницы --- */
+    if(req.method !== 'GET'){ res.writeHead(405); return res.end(); }
+    if(p === '/' || p === '/index.html' || p.startsWith('/Greenville')){
+      const f1 = path.join(PUBLIC, 'index.html');
+      const f2 = path.join(DIR, 'Greenville-касса.html');
+      return serveFile(res, fs.existsSync(f1) ? f1 : f2);
+    }
+    const file = safeJoin(DIR, p);
+    if(file && fs.existsSync(file) && fs.statSync(file).isFile()) return serveFile(res, file);
+    return serveFile(res, fs.existsSync(path.join(PUBLIC,'index.html')) ? path.join(PUBLIC,'index.html') : path.join(DIR, 'Greenville-касса.html'));
+  }catch(e){
+    return json(res, 500, {ok:false, msg:'Ошибка сервера: ' + e.message});
+  }
+});
+
+/* данные в памяти всегда свежие; если запись не удалась — дописываем при следующем изменении */
+process.on('uncaughtException', e=>{ console.error('Ошибка: ' + (e && e.message)); });
+
+server.listen(PORT, HOST, ()=>{
+  console.log('Greenville касса запущена на порту ' + PORT);
+  console.log('Данные: ' + DATA_DIR);
+  if(!CLOUD_PASS && !(AUTH.staff||[]).length){
+    console.log('ВНИМАНИЕ: пароль администратора не задан — при первом входе используется заводской (admin/admin).');
+    console.log('Задайте ADMIN_PASSWORD в настройках хостинга и перезапустите.');
+  }
+});
