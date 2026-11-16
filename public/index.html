@@ -5096,6 +5096,37 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     }).catch(()=> null);
   };
 
+  /* ---- каталог напрямую из общей базы ----
+     Если общий ответ почему-то пришёл с пустым каталогом (старая копия,
+     недогруз, сбой слияния), телефон сам запрашивает список товаров
+     отдельным коротким запросом и кладёт его в каталог. */
+  let catBusy = false;
+  window.cloudSyncCatalog = function(){
+    if(!conf || !token || catBusy) return Promise.resolve(false);
+    catBusy = true;
+    return api('GET', '/api/catalog').then(o=>{
+      catBusy = false;
+      if(!o || !o.ok || !Array.isArray(o.products)) return false;
+      let n = 0;
+      try{ n = (typeof DB !== 'undefined' && DB && Array.isArray(DB.products)) ? DB.products.length : 0; }catch(e){ n = 0; }
+      /* берём с сервера, если он не пустой; если пустой, но локально что-то есть — оставляем своё */
+      if(!o.products.length){ if(n > 0) return false; }
+      const same = n === o.products.length && n > 0 && JSON.stringify(DB.products) === JSON.stringify(o.products);
+      if(same) return false;
+      try{
+        DB.products = o.products;
+        window.DB = DB;
+        try{ localStorage.setItem('greenville_pos_v1', JSON.stringify(DB)); }catch(e){}
+        if(typeof refreshAll === 'function') refreshAll();
+        else {
+          if(typeof renderProductGrid === 'function') renderProductGrid();
+          if(typeof renderPos === 'function') renderPos();
+        }
+      }catch(e){}
+      return true;
+    }).catch(()=>{ catBusy = false; return false; });
+  };
+
   /** тихая синхронизация: раз в несколько секунд — и вверх и вниз */
   window.cloudTick = async function(){
     if(!conf) return;
@@ -5108,6 +5139,12 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         // пока ждём номер нового чека — базу не подменяем, иначе номер потеряется
         if(!counterBusy && !counterLocal) applyServer(o);
         lastOk = Date.now(); online = true; paint('ok');
+        // каталог пуст, а товары на сервере есть — забираем список напрямую
+        try{
+          const n = (DB && Array.isArray(DB.products)) ? DB.products.length : 0;
+          const s = (o.db && Array.isArray(o.db.products)) ? o.db.products.length : 0;
+          if(!n || !s) await window.cloudSyncCatalog();
+        }catch(e){}
       }
       else if(o && o.__status === 0) setOffline();
     }catch(e){ setOffline(); }
@@ -5153,6 +5190,8 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
         startTimer();
         await afterConnect(noPush);
         await pullStaff();
+        // сразу после входа — гарантированно забираем каталог из общей базы
+        await window.cloudSyncCatalog();
         return true;
       }
       if(o && o.__status >= 500) setOffline();
@@ -5548,11 +5587,11 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     addSettingsBlock();
     // новый сервер без сотрудников — сразу показываем экран «первый вход»
     if(!token) setupNeeded().then(need=>{ if(need) setTimeout(showSetup, 200); });
-    if(token){ startTimer(); setTimeout(()=>{ cloudTick(); pullStaff(); }, 1200); }
+    if(token){ startTimer(); setTimeout(()=>{ cloudTick(); window.cloudSyncCatalog(); pullStaff(); }, 1200); }
     }catch(e){ console.error('cloud boot', e); }
   }
 
-  window.addEventListener('online', ()=>{ if(conf && token){ paint('ok'); window.cloudTick(); } });
+  window.addEventListener('online', ()=>{ if(conf && token){ paint('ok'); window.cloudTick(); window.cloudSyncCatalog(); } });
 
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ()=> setTimeout(boot, 120));
   else setTimeout(boot, 120);
