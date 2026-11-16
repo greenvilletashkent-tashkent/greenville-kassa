@@ -113,6 +113,20 @@ function mergeProducts(list){
 
 function bump(){ REV++; saveDb(); }
 
+/* Сколько уже было на сервере: если пришло пусто, а тут товары есть —
+   это пустая база с нового телефона, а не удаление. Не затираем. */
+function isEmptyCatalog(list){
+  if(!Array.isArray(list) || !list.length) return true;
+  for(const p of list){ if(p && String(p.name||'').trim()) return false; }
+  return true;
+}
+function isEmptyList(list){ return !Array.isArray(list) || !list.length; }
+function keepNewest(a, b){
+  const ta = Date.parse(a || 0), tb = Date.parse(b || 0);
+  if(tb && (!ta || tb > ta)) return b;
+  return a;
+}
+
 /* ---------- сессии в памяти ---------- */
 const sessions = new Map();   // token -> {id, login, role, name, at}
 const TTL = 1000*60*60*24*30;
@@ -315,6 +329,14 @@ const server = http.createServer(async (req, res)=>{
       db.customers = Array.isArray(db.customers) ? db.customers : [];
       db.sales = Array.isArray(db.sales) ? db.sales : [];
       if(!db.counter) db.counter = 1001;
+      /* Защита от пустой базы: свежий телефон, который ещё не скачал данные,
+         присылает товары:[] и чеки:[] — это не означает «удалить всё».
+         Такое пустое не принимаем, если на сервере уже что-то есть. */
+      let guarded = false;
+      if(isEmptyCatalog(db.products) && !isEmptyCatalog(DB.products)){ db.products = DB.products; guarded = true; }
+      if(isEmptyList(db.sales) && !isEmptyList(DB.sales)){ db.sales = DB.sales; guarded = true; }
+      if(isEmptyList(db.customers) && !isEmptyList(DB.customers)){ db.customers = DB.customers; guarded = true; }
+      if(guarded) logChange(me, 'save-guard', 'пустая база с устройства не затёрла общую');
       DB = db; bump();
       logChange(me, 'save', 'товаров '+db.products.length+', чеков '+db.sales.length);
       return json(res, 200, {ok:true, rev:REV});
@@ -375,7 +397,7 @@ const server = http.createServer(async (req, res)=>{
       const b = await readBody(req, 16*1024*1024);
       const m = b.meta || {};
       if(Array.isArray(m.products)) mergeProducts(m.products);
-      if(Array.isArray(m.customers)) DB.customers = m.customers;
+      if(Array.isArray(m.customers) && !(isEmptyList(m.customers) && !isEmptyList(DB.customers))) DB.customers = m.customers;
       if(m.counter) DB.counter = Math.max(+DB.counter||1001, +m.counter||0);
       if(m.bonusPct != null) DB.bonusPct = +m.bonusPct || 5;
       bump();
