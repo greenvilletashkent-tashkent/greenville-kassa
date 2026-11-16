@@ -796,6 +796,23 @@ input,select{font:inherit;color:inherit}
   .stat-row{grid-template-columns:1fr 1fr}
 }
 
+
+/* ───────── КАССА НА ТЕЛЕФОНЕ: только поиск, сканер и чек ───────── */
+@keyframes scanln{0%{top:8%}50%{top:88%}100%{top:8%}}
+.scan-ov{position:fixed;inset:0;z-index:120;background:rgba(4,20,14,.92);display:flex;align-items:center;justify-content:center;padding:14px}
+.scan-box{width:min(460px,100%);background:#0d2a1e;border-radius:16px;overflow:hidden;color:#fff;display:flex;flex-direction:column}
+.scan-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;font-size:13.5px;font-weight:700}
+.scan-x{background:rgba(255,255,255,.12);border:0;color:#fff;width:30px;height:30px;border-radius:8px;font-size:15px;line-height:1}
+.scan-box video{width:100%;aspect-ratio:4/3;object-fit:cover;background:#000;display:block}
+.scan-box{position:relative}
+.scan-tip{position:absolute;left:14px;right:14px;top:calc(50% - 40px);text-align:center;font-size:12px;opacity:.85;pointer-events:none}
+.scan-box::after{content:'';position:absolute;left:8%;right:8%;top:30%;height:44%;border:2px solid rgba(124,199,157,.85);border-radius:12px;pointer-events:none;box-shadow:0 0 0 100vmax rgba(0,0,0,.15)}
+.scan-manual{display:flex;gap:8px;padding:12px 14px 16px;background:#0d2a1e}
+.scan-manual input{flex:1;min-height:44px;border-radius:9px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#fff;padding:0 12px;font-size:16px}
+.scan-manual input::placeholder{color:rgba(255,255,255,.5)}
+.scan-manual button{min-height:44px;padding:0 16px;border-radius:9px;border:0;background:var(--g500,#2e8b57);color:#fff;font-weight:800;font-size:13px}
+
+
 /* --- индикатор общей базы в шапке --- */
 .cloud-chip{
   display:flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--bg);
@@ -806,6 +823,47 @@ input,select{font:inherit;color:inherit}
 .cloud-chip[data-state="off"] i{background:var(--amber)}
 .cloud-chip span{white-space:nowrap}
 @media (max-width:760px){ .cloud-chip span{display:none} .cloud-chip{padding:6px} }
+@media(max-width:980px){
+  /* одна колонка: сначала поиск и товары, чек — ниже, прокруткой */
+  .pos-layout{display:flex;flex-direction:column;height:auto;gap:10px;padding-bottom:4px}
+  .pos-catalog{flex:0 0 auto}
+  .pos-toolbar{position:sticky;top:0;z-index:12;background:var(--bg,#f5f8f6);padding:2px 0 6px;margin-bottom:4px}
+  .pos-toolbar .search-wrap{flex:1}
+  .pos-toolbar .search-wrap input{min-height:46px;font-size:16px !important}
+  .btn-scan{width:46px;height:46px;border-radius:11px;border-color:var(--g300)}
+  .btn-scan svg{width:22px;height:22px}
+  .btn-service{min-height:46px;padding:0 12px}
+  .btn-service span{display:none}
+  /* категории на телефоне сворачиваем: они занимали пол экрана */
+  body.gv-phone .chips{display:none}
+  body.gv-cashier .view:not(#view-pos){display:none!important}
+  body.gv-cashier .sidebar{display:none}
+  body.gv-cashier .menu-btn{display:none}
+  body.gv-cashier .tb-right .user{display:none}
+  body.gv-cashier .pos-cart{position:static;max-height:none;box-shadow:var(--sh-sm);margin-top:2px}
+  body.gv-cashier .cart-items{max-height:none}
+  body.gv-cashier .cart-items:empty{display:none}
+  /* на телефоне в режиме кассы — только поиск, сканер и чек */
+  body.gv-cashier .btn-service{display:none}
+  body.gv-cashier .pos-catalog .chips,body.gv-cashier .chips{display:none!important}
+  .cart-cust,.cart-note{display:none}
+  body.gv-phone .cart-head{padding:10px 12px 8px}
+  body.gv-phone .cart-head h2{font-size:12.5px}
+  body.gv-phone .cart-summary{padding:10px 12px calc(12px + env(safe-area-inset-bottom))}
+  body.gv-phone .sum-line{padding:4px 0}
+  body.gv-phone .sum-line.disc,body.gv-phone .sum-line.svc{display:none}
+  body.gv-phone .cart-footer-extra{display:none}
+  body.gv-phone .split-box{display:none!important}
+  body.gv-phone .pay-methods{gap:6px;padding:6px 0}
+  body.gv-phone .pay-btn{min-height:42px;font-size:12px}
+  body.gv-phone .chk-row{gap:6px;position:sticky;bottom:0;background:#fff;padding-top:6px;padding-bottom:2px}
+  body.gv-phone .btn-hold{padding:0 10px;font-size:12px}
+  body.gv-phone .btn-checkout{min-height:52px;font-size:14.5px}
+  body.gv-phone .product-grid{max-height:none;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:7px}
+}
+
+
+
 
 /* ===== отложенные чеки, примечания, правка чека ===== */
 .chk-row{display:flex;gap:8px;align-items:stretch}
@@ -1648,6 +1706,11 @@ function applyRole(){
   document.getElementById('uName').textContent = CURRENT.name.split(' ')[0];
   document.getElementById('uRole').textContent = roleName(CURRENT.role);
   document.getElementById('uAva').textContent = initials(CURRENT.name);
+  /* Телефон — только касса. Остальные разделы (склад, отчёты, сотрудники)
+     остаются на компьютере администратора. */
+  const phone = matchMedia('(max-width:980px)').matches;
+  document.body.classList.toggle('gv-phone', phone);
+  document.body.classList.toggle('gv-cashier', phone && !isAdmin());
   document.querySelectorAll('.nav-item').forEach(n=>{
     const v = n.dataset.view;
     n.hidden = !!v && !can(v);
@@ -1656,6 +1719,14 @@ function applyRole(){
   document.querySelectorAll('.admin-only').forEach(el=>{ el.hidden = !isAdmin(); });
   const badge = document.querySelector('.sb-foot .store-pill small');
   if(badge) badge.textContent = `Смена открыта · ${CURRENT.name.split(' ')[0]}`;
+  /* если телефон открыли не на кассе — возвращаем на кассу */
+  if(phone && !isAdmin()){
+    const active = document.querySelector('.view.active');
+    if(active && active.id !== 'view-pos'){
+      document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-pos'));
+      document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view==='pos'));
+    }
+  }
 }
 
 function load(){
@@ -1745,7 +1816,12 @@ function renderCatChips(){
 function renderProductGrid(){
   const q = document.getElementById('posSearch').value.trim().toLowerCase();
   let list = DB.products.filter(p=> activeCat==='Все' || p.cat===activeCat);
-  if(q) list = list.filter(p=> p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
+  if(q) list = list.filter(p=> p.name.toLowerCase().includes(q) || (p.sku||'').toLowerCase().includes(q)
+    || (p.barcode||'').toLowerCase().includes(q));
+  /* Товар, пробитый сканером, показываем первым и с пометкой «штрихкод»,
+     даже если у него нет остатка или он не попал в категорию. */
+  const scanned = q ? DB.products.find(p=> p.id === window.__gvScannedId) : null;
+  if(scanned && !list.some(p=>p.id===scanned.id)) list = [scanned, ...list];
   const grid = document.getElementById('productGrid');
   const empty = document.getElementById('emptySearch');
 
@@ -3988,6 +4064,79 @@ function initImport(){
   impModal.addEventListener('keydown', e => { if(e.key === 'Enter' && e.target.tagName !== 'SELECT') e.preventDefault(); });
 }
 
+/* ================= СКАНЕР ШТРИХКОДА ================= */
+/* Продавцу не нужны никакие настройки: код можно ввести пистолетом (он сам нажмёт Enter),
+   вручную с клавиатуры телефона или навести камеру. */
+function openScanner(){
+  closeModals();
+  const box = document.getElementById('posSearch');
+  const useCam = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.isSecureContext);
+  if(!useCam){
+    /* камеры нет или страница открыта не по защищённому адресу — работаем полем поиска */
+    if(box){ box.value = ''; box.focus(); }
+    toast('Сканируйте пистолетом или введите код в поиск');
+    return;
+  }
+  const ov = document.createElement('div');
+  ov.className = 'scan-ov'; ov.id = 'scanOv';
+  ov.innerHTML = '<div class="scan-box">' +
+    '<div class="scan-head"><b>Наведите камеру на штрихкод</b><button class="scan-x" aria-label="Закрыть">✕</button></div>' +
+    '<video id="scanVideo" playsinline muted></video>' +
+    '<div class="scan-tip">Держите код в рамке, 10–20 см от товара</div>' +
+    '<div class="scan-manual"><input id="scanManual" type="text" inputmode="numeric" placeholder="Или введите цифры вручную" autocomplete="off">' +
+    '<button id="scanManualGo">Найти</button></div>' +
+    '</div>';
+  document.body.appendChild(ov);
+  let stream = null, stopped = false, raf = 0;
+  const stop = ()=>{
+    stopped = true;
+    if(raf) try{ cancelAnimationFrame(raf); }catch(e){}
+    try{ if(stream) stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+    ov.remove();
+  };
+  ov.querySelector('.scan-x').onclick = stop;
+  ov.onclick = e=>{ if(e.target === ov) stop(); };
+  const manual = ()=>{
+    const code = (document.getElementById('scanManual').value || '').trim();
+    if(!code) return;
+    stop();
+    const f = document.getElementById('posSearch');
+    if(f){ f.value = code; }
+    const ev = new KeyboardEvent('keydown', {key:'Enter', bubbles:true});
+    f.dispatchEvent(ev);
+  };
+  ov.querySelector('#scanManualGo').onclick = manual;
+  ov.querySelector('#scanManual').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); manual(); } });
+
+  const video = ov.querySelector('#scanVideo');
+  navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}, audio:false}).then(s=>{
+    stream = s; video.srcObject = s; video.play();
+    /* Телефон без встроенного распознавания (или iPhone/Safari) —
+       код всё равно можно набрать в поле ниже, камера остаётся как удобная лупа. */
+    const Det = window.BarcodeDetector;
+    if(!Det) return;
+    const det = new Det({formats:['ean_13','ean_8','code_128','code_39','upc_a','upc_e','itf','codabar','qr_code']});
+    const once = async ()=>{
+      if(stopped) return;
+      try{
+        const codes = await det.detect(video);
+        if(codes && codes.length && codes[0].rawValue){
+          const v = String(codes[0].rawValue).trim();
+          stop();
+          const f = document.getElementById('posSearch');
+          if(f){ f.value = v; f.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); }
+          return;
+        }
+      }catch(e){}
+      raf = requestAnimationFrame(once);
+    };
+    raf = requestAnimationFrame(once);
+  }).catch(()=>{
+    ov.querySelector('.scan-tip').textContent = 'Камера не открылась. Разрешите доступ или введите код вручную.';
+  });
+}
+window.openScanner = openScanner;
+
 /* ================= INIT ================= */
 function init(){
   load();
@@ -3998,6 +4147,9 @@ function init(){
   document.getElementById('menuBtn').onclick = ()=> document.getElementById('sidebar').classList.toggle('open');
   const _bl=document.getElementById('btnLock'); if(_bl) _bl.onclick = ()=>{ closeModals(); toast('Смена закрыта. Открыта новая смена.'); const d=new Date(); const c=document.getElementById('clock'); if(c) c.textContent=d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}); };
 
+  /* поворот телефона / смена ширины окна: режим «только касса» пересчитываем */
+  try{ window.addEventListener('resize', ()=>{ if(typeof applyRole==='function' && CURRENT) applyRole(); }); }catch(e){}
+
   // clock
   const tick = ()=>{ const d=new Date(); document.getElementById('clock').textContent = d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}); };
   tick(); setInterval(tick, 15000);
@@ -4005,24 +4157,65 @@ function init(){
   // POS
   document.getElementById('posSearch').oninput = ()=> renderProductGrid();
   document.getElementById('posSearch').onkeydown = e=>{
-    if(e.key==='Enter'){
-      const q = e.target.value.trim().toLowerCase();
-      if(!q) return;
-      if(/^\d{4,}$/.test(q)){ // сканер: ищем по штрихкоду, затем по артикулу
-        const p = DB.products.find(x=>(x.barcode||'')===q)
-               || DB.products.find(x=>(x.sku||'').toLowerCase()===q)
-               || DB.products.find(x=>(x.sku||'').toLowerCase().endsWith(q));
-        if(p){ addToCart(p.id); e.target.value=''; renderProductGrid(); toast('Добавлено: ' + p.name); return; }
-      }
-      const first = DB.products.find(p=> (p.name.toLowerCase().includes(q) || (p.barcode||'').includes(q) || (p.sku||'').toLowerCase().includes(q)));
-      if(first){ addToCart(first.id); e.target.value=''; renderProductGrid(); }
-      else toast('Товар не найден', true);
+    if(e.key!=='Enter') return;
+    e.preventDefault();
+    const raw = e.target.value.trim();
+    if(!raw) return;
+    const q = raw.toLowerCase();
+    /* Сканер (пистолет, блютус или камера телефона) вводит цифры и нажимает Enter.
+       Такой код ищем ТОЧНО: штрихкод → артикул → последние цифры артикула. */
+    const digits = raw.replace(/\D/g,'');
+    if(/^\d{4,}$/.test(raw.trim())){
+      const p = findByCode(raw.trim());
+      if(p){ takeScanned(p); e.target.value=''; return; }
+      /* на этом телефоне каталог мог быть не обновлён — спрашиваем общую базу */
+      e.target.value='';
+      toast('Ищу в общей базе…');
+      lookupOnServer(raw.trim()).then(fp=>{
+        if(fp){ takeScanned(fp); } else { toast('Такой штрихкод не найден: ' + raw.trim(), true); }
+      });
+      return;
     }
+    /* обычный поиск по названию — можно добавлять сразу */
+    const first = DB.products.find(p=> p.name.toLowerCase().includes(q) || (p.sku||'').toLowerCase().includes(q));
+    if(first){ addToCart(first.id); e.target.value=''; renderProductGrid(); }
+    else toast('Товар не найден', true);
   };
+  /* поиск по штрихкоду/артикулу внутри уже скачанного каталога */
+  function findByCode(code){
+    const c = String(code).trim();
+    const cl = c.toLowerCase();
+    const list = Array.isArray(DB.products) ? DB.products : [];
+    const norm = v => String(v||'').replace(/\s+/g,'').toLowerCase();
+    return list.find(p=> norm(p.barcode) === cl)
+        || list.find(p=> norm(p.sku) === cl)
+        || list.find(p=> norm(p.barcode).endsWith(cl))
+        || list.find(p=> norm(p.sku).endsWith(cl));
+  }
+  window.__gvFindByCode = findByCode;
+  /* добавить проданный по штрихкоду товар и один раз показать подсказку */
+  function takeScanned(p){
+    if(!p) return;
+    window.__gvScannedId = p.id;
+    addToCart(p.id);
+    renderProductGrid();
+    const box = document.getElementById('posSearch');
+    if(box) box.value = '';
+    toast('Добавлено: ' + p.name + (p.stock<=0 ? ' (остатка нет — уйдёт в минус)' : ''));
+  }
+  /* если товара нет на телефоне — ищем его в общей базе и забираем только его */
+  async function lookupOnServer(code){
+    try{
+      if(!window.cloudFindProduct) return null;
+      const p = await window.cloudFindProduct(code);
+      if(p && !(DB.products||[]).some(x=>x.id===p.id)){ DB.products.push(p); try{ if(typeof save==='function') save(); }catch(e){} }
+      return p || null;
+    }catch(e){ return null; }
+  }
   document.getElementById('btnScan').onclick = ()=>{
-    const pool = DB.products.length ? DB.products : [];
-    const p = pool[Math.floor(Math.random()*pool.length)];
-    if(p){ addToCart(p.id); toast('Штрихкод распознан: ' + p.name); }
+    /* Сканер-пистолет/блютус печатает код в поле поиска сам — просто ставим туда курсор.
+       Если сканера нет, пробуем камеру телефона. */
+    openScanner();
   };
   document.getElementById('btnClearCart').onclick = ()=>{ cart=[]; cartDiscount=0; cartDiscountSum=0; cartCustomer=null; cartOrder=null; cartNote=null; renderCart(); };
   document.getElementById('btnCustomer').onclick = openCustomerPicker;
@@ -4864,6 +5057,15 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
   window.cloudFlush = function(){
     if(!conf) return;
     try{ push(); }catch(e){}
+  };
+
+  /** телефон не нашёл товар по коду у себя — спрашиваем общую базу.
+      Так продавец со старой копией каталога всё равно пробьёт товар. */
+  window.cloudFindProduct = function(code){
+    if(!conf || !token) return Promise.resolve(null);
+    return api('GET', '/api/find?code=' + encodeURIComponent(String(code||''))).then(o=>{
+      return (o && o.ok && o.product) ? o.product : null;
+    }).catch(()=> null);
   };
 
   /** тихая синхронизация: раз в несколько секунд — и вверх и вниз */
