@@ -830,6 +830,8 @@ input,select{font:inherit;color:inherit}
 .m-price{font-size:13px;font-weight:800;color:var(--g700,#1d6b43);display:block}
 .m-stock{font-size:10.5px;color:var(--ink2)}
 .m-stock.zero{color:var(--red,#c0392b)}
+.m-hint{font-size:11.5px;color:var(--ink2);padding:2px 2px 6px}
+.m-hint b{color:var(--ink)}
 
 /* --- индикатор общей базы в шапке --- */
 .cloud-chip{
@@ -888,8 +890,19 @@ input,select{font:inherit;color:inherit}
      товары и чек прокручиваются под ней, а не прячут её */
   body.gv-phone .pos-toolbar{position:sticky;top:0;z-index:40;background:var(--bg,#f5f8f6);padding:2px 0 6px}
   body.gv-cashier .pos-toolbar,body.gv-phone .pos-toolbar{top:0}
-  /* поиск на телефоне: под строкой — список совпадений текстом, сетка скрыта */
-  body.gv-phone.gv-searching .product-grid{display:none}
+  /* на телефоне сетки плиток нет вообще: только строка поиска и найденные товары строками.
+     Так чек с оплатой всегда под рукой и не уезжает за длинной сеткой. */
+  body.gv-phone .product-grid{display:none!important}
+  /* телефон: .main прокручивается целиком, по строке поиска и по списку товаров
+     — поэтому прокрутку вешаем на .main, а не на список */
+  body.gv-phone .matches-list{max-height:none!important;overflow:visible!important}
+  body.gv-phone .pos-catalog{min-height:auto}
+  /* телефон: колонку товаров не растягиваем на всю высоту — иначе чек с «Оплатить»
+     уезжает далеко вниз. Прокручивается только список товаров, итог и оплата остаются на экране. */
+  body.gv-phone .pos-catalog{align-self:start;display:flex;flex-direction:column;min-height:0}
+  body.gv-phone .pos-layout{height:calc(100vh - 58px);height:calc(100dvh - 58px);align-items:start}
+  body.gv-phone .matches-list{overflow-y:auto;-webkit-overflow-scrolling:touch;max-height:34vh}
+  body.gv-phone .empty-search{border:0;padding:14px 6px}
   body.gv-phone .matches-list{margin-top:2px}
   body.gv-phone .cart-head{padding:8px 12px 6px}
   body.gv-phone .cart-head h2{font-size:12.5px}
@@ -1763,12 +1776,17 @@ function applyRole(){
   document.querySelectorAll('.admin-only').forEach(el=>{ el.hidden = !isAdmin(); });
   const badge = document.querySelector('.sb-foot .store-pill small');
   if(badge) badge.textContent = `Смена открыта · ${CURRENT.name.split(' ')[0]}`;
-  /* если телефон открыли не на кассе — возвращаем на кассу */
-  if(phone && !isAdmin()){
+  /* если телефон открыли не на кассе — возвращаем на кассу (кроме раздела «Товары»:
+     продавцу разрешено посмотреть список товаров) */
+  {
+    const cur = document.querySelector('.view.active');
+    const inProducts = cur && cur.id === 'view-products' && can('products');
+    if(phone && !isAdmin() && !inProducts){
     const active = document.querySelector('.view.active');
     if(active && active.id !== 'view-pos'){
       document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active', v.id==='view-pos'));
       document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active', n.dataset.view==='pos'));
+    }
     }
   }
 }
@@ -1792,9 +1810,35 @@ function load(){
 }
 function save(){
   try{ localStorage.setItem(LS_KEY, JSON.stringify(DB)); }catch(e){}
+  /* у продавца каталог и чеки раньше оставались только на его телефоне:
+     сразу просим облако сохранить — иначе продавец другой смены их не увидит */
+  try{
+    if(typeof CURRENT !== 'undefined' && CURRENT && CURRENT.role !== 'admin' && typeof window.cloudPushNow === 'function'){
+      if(window.__cloudSaveT) clearTimeout(window.__cloudSaveT);
+      window.__cloudSaveT = setTimeout(()=>{
+        window.__cloudSaveT = null;
+        try{ window.cloudPushNow(); }catch(e){}
+        /* после продажи на телефоне остаётся экран чека — он закрывается сам,
+           и продавец сразу видит новый пустой чек */
+        try{
+          const openRcpt = document.getElementById('modalReceipt');
+          if(openRcpt && !openRcpt.hidden){
+            setTimeout(()=>{
+              try{
+                const e = new Event('click', {bubbles:true});
+                const btn = document.getElementById('btnNewSale');
+                if(btn) btn.dispatchEvent(e);
+              }catch(e){}
+            }, 800);
+          }
+        }catch(e){}
+      }, 400);
+    }
+  }catch(e){}
 }
 /* отметить, что чек изменён (по этому времени синхронизация понимает, чья версия свежее) */
 function touchSale(saleId){
+  try{ if(typeof window.__cloudOwnTouch === 'function') window.__cloudOwnTouch(saleId); }catch(e){}
   try{
     const s = DB.sales.find(x=>String(x.id)===String(saleId));
     if(s) s.updatedAt = new Date().toISOString();
@@ -1879,6 +1923,13 @@ function renderProductGrid(){
     grid.innerHTML='';
     renderMatchList([]);
     empty.hidden=false;
+    /* на телефоне пустота без поиска — это не «ничего не найдено», а просто нет товаров */
+    if(document.body.classList.contains('gv-phone') && !q){
+      empty.innerHTML = DB.products.length === 0
+        ? `<div class="es-ic">🌱</div><b>В каталоге пока нет товаров</b><span>Товары появятся, когда их добавят на компьютере</span>`
+        : `<div class="es-ic">🌱</div><b>В этой категории пусто</b><span>Введите название товара в строке поиска</span>`;
+      return;
+    }
     const none = DB.products.length === 0;
     empty.innerHTML = none
       ? `<div class="es-ic">🌱</div><b>В каталоге пока нет товаров</b><span>Откройте «Товары и склад» и загрузите файл с товарами</span>`
@@ -1886,7 +1937,7 @@ function renderProductGrid(){
     return;
   }
   empty.hidden = true;
-  renderMatchList(q ? list : []);
+  renderMatchList(list);
   const svcCards = showSvc ? svcMatches.map(x=>`
     <button class="p-card svc-card" data-svc="${x.key}">
       <span class="svc-badge">УСЛУГА</span>
@@ -1927,11 +1978,31 @@ function renderProductGrid(){
 function renderMatchList(list){
   const box = document.getElementById('matchList');
   if(!box) return;
-  const searching = document.getElementById('posSearch').value.trim() !== '';
+  const q = document.getElementById('posSearch').value.trim();
+  const searching = q !== '';
   document.body.classList.toggle('gv-searching', searching);
-  if(!searching || !list || !list.length){ box.hidden = true; box.innerHTML = ''; return; }
+  const phone = document.body.classList.contains('gv-phone');
+  if(!searching){
+    /* телефон (режим кассы): без поиска товары всё равно показаны строками —
+       сетки плиток там больше нет. На компьютере подсказку не показываем. */
+    if(phone && list && list.length){
+      box.hidden = false;
+      const total = (typeof DB!=='undefined' && Array.isArray(DB.products)) ? DB.products.length : list.length;
+      box.innerHTML = '<div class="m-hint">Всего товаров: <b>' + total + '</b> · начните вводить название или артикул</div>'
+        + renderMatchRows(list);
+      bindMatchRows(box);
+      return;
+    }
+    box.hidden = true; box.innerHTML = ''; return;
+  }
+  if(!list || !list.length){ box.hidden = true; box.innerHTML = ''; return; }
   box.hidden = false;
-  box.innerHTML = list.slice(0, 40).map(p=>{
+  box.innerHTML = renderMatchRows(list);
+  bindMatchRows(box);
+}
+
+function renderMatchRows(list){
+  return list.slice(0, 60).map(p=>{
     const st = p.stock===0 ? 'zero' : p.stock<0 ? 'neg' : p.stock<=5 ? 'low' : '';
     const stockTxt = p.stock<0 ? `${p.stock} шт` : p.stock===0 ? 'нет в наличии' : `${p.stock} шт`;
     const sub = [p.cat, p.sku ? 'арт. ' + p.sku : '', p.barcode ? p.barcode : ''].filter(Boolean).join(' · ');
@@ -1948,6 +2019,9 @@ function renderMatchList(list){
       </span>
     </button>`;
   }).join('');
+}
+
+function bindMatchRows(box){
   box.querySelectorAll('.m-row').forEach(row=>{
     row.onclick = ()=> addToCart(row.dataset.id);
   });
@@ -2259,6 +2333,7 @@ function checkout(){
     }
   }
   DB.sales.unshift(sale);
+  try{ if(typeof window.__cloudOwnTouch === 'function') window.__cloudOwnTouch(sale.id); }catch(e){}
   // бонусы клиенту
   if(cartCustomer){
     const c = DB.customers.find(x=>x.id===cartCustomer.id);
@@ -5067,13 +5142,19 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     }).catch(()=> false);
   }
 
+  /** чеки, созданные/правленые на этом телефоне и ещё не подтверждённые сервером */
+  const ownTouched = {};
+  window.__cloudOwnTouch = function(id){ ownTouched[String(id)] = true; };
+
   /** чеки, которых сервер ещё не видел (или они правлены позже) */
   function pendingSales(){
     const out = [];
     (DB.sales||[]).forEach(s=>{
       if(!s || !s.id) return;
       const t = Date.parse(s.updatedAt || s.paidAt || s.deletedAt || s.date || 0);
-      if(sentMap[String(s.id)] !== t) out.push(s);
+      /* чек, созданный на этом устройстве, отправляем сразу, даже если время совпало
+         с уже отправленным (одна и та же миллисекунда у двух телефонов) */
+      if(sentMap[String(s.id)] !== t || ownTouched[String(s.id)]) out.push(s);
     });
     return out;
   }
@@ -5085,6 +5166,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
       if(o && o.ok){
         const t = Date.parse(s.updatedAt || s.paidAt || s.deletedAt || s.date || 0);
         sentMap[String(s.id)] = t;
+        delete ownTouched[String(s.id)];
         // облако выдало этому чеку другой номер (совпал с чужим) — забираем новый
         if(o.sale && o.sale.id && String(o.sale.id) !== String(s.id)) renumber(s.id, o.sale.id, o.sale);
       }
