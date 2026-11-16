@@ -319,6 +319,14 @@ const server = http.createServer(async (req, res)=>{
       return json(res, 200, {ok:true, rev:REV, at:new Date().toISOString(), db:DB, staff:(AUTH.staff||[]).map(x=>({id:x.id, login:x.login, name:x.name, role:x.role, active:x.active, created:x.created}))});
     }
 
+    /* --- только каталог ---
+       Телефону нужен короткий список товаров: если общий ответ пришёл
+       с пустым каталогом, устройство добирает товары этим запросом. */
+    if(p === '/api/catalog' && req.method === 'GET'){
+      const list = Array.isArray(DB.products) ? DB.products : [];
+      return json(res, 200, {ok:true, rev:REV, count:list.length, products:list});
+    }
+
     /* --- найти товар по штрихкоду или артикулу ---
        Нужно телефону: каталог на устройстве мог устареть, а товар на месте.
        Отдаём ровно один товар, всю базу наружу не выкладываем. */
@@ -502,6 +510,17 @@ const server = http.createServer(async (req, res)=>{
 
 /* данные в памяти всегда свежие; если запись не удалась — дописываем при следующем изменении */
 process.on('uncaughtException', e=>{ console.error('Ошибка: ' + (e && e.message)); });
+/* Если при запуске что-то пошло не так, сервер не должен «молча умереть» —
+   иначе хостинг показывает только 502 без причины. Пишем причину в журнал. */
+process.on('unhandledRejection', e=>{ console.error('Необработанная ошибка: ' + (e && (e.stack || e.message || e))); });
+for(const sig of ['SIGTERM','SIGINT','SIGHUP']){
+  process.on(sig, ()=>{ console.log('Получен сигнал ' + sig + ' — завершаемся'); process.exit(0); });
+}
+
+server.on('error', e=>{
+  console.error('Не удалось занять порт ' + PORT + ': ' + (e && e.message));
+  process.exit(1);
+});
 
 server.listen(PORT, HOST, ()=>{
   console.log('Greenville касса запущена на порту ' + PORT);
