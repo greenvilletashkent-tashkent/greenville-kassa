@@ -5064,7 +5064,12 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
   window.cloudFindProduct = function(code){
     if(!conf || !token) return Promise.resolve(null);
     return api('GET', '/api/find?code=' + encodeURIComponent(String(code||''))).then(o=>{
-      return (o && o.ok && o.product) ? o.product : null;
+      const p = (o && o.ok && o.product) ? o.product : null;
+      /* товар взяли из общей базы — каталог на этом устройстве был устаревшим.
+         Сразу подтягиваем свежий список, чтобы в сетке были все товары,
+         а не только те, что успели скачать раньше. */
+      if(p && window.cloudTick){ try{ window.cloudTick(); }catch(e){} }
+      return p;
     }).catch(()=> null);
   };
 
