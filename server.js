@@ -319,6 +319,24 @@ const server = http.createServer(async (req, res)=>{
       return json(res, 200, {ok:true, rev:REV, at:new Date().toISOString(), db:DB, staff:(AUTH.staff||[]).map(x=>({id:x.id, login:x.login, name:x.name, role:x.role, active:x.active, created:x.created}))});
     }
 
+    /* --- найти товар по штрихкоду или артикулу ---
+       Нужно телефону: каталог на устройстве мог устареть, а товар на месте.
+       Отдаём ровно один товар, всю базу наружу не выкладываем. */
+    if(p === '/api/find' && req.method === 'GET'){
+      const code = String((url.split('code=')[1] || '').split('&')[0] || '').trim();
+      const c = decodeURIComponent(code).trim();
+      if(!c) return json(res, 400, {ok:false, msg:'Пустой код'});
+      const cl = c.toLowerCase();
+      const norm = v => String(v||'').replace(/\s+/g,'').toLowerCase();
+      const list = Array.isArray(DB.products) ? DB.products : [];
+      const prod = list.find(x=> norm(x.barcode) === cl)
+                || list.find(x=> norm(x.sku) === cl)
+                || list.find(x=> norm(x.barcode).endsWith(cl))
+                || list.find(x=> norm(x.sku).endsWith(cl))
+                || null;
+      return json(res, 200, {ok:true, product:prod});
+    }
+
     /* --- сохранить всю базу --- */
     if(p === '/api/data' && req.method === 'PUT'){
       if(me.role !== 'admin') return json(res, 403, {ok:false, msg:'Изменять данные может администратор'});
