@@ -101,11 +101,17 @@ function mergeProducts(list){
   const idx = new Map(DB.products.map((p,i)=>[String(p&&p.id), i]));
   list.forEach(p=>{
     if(!p || !p.id) return;
+    if((DB._gvDeletedProducts||{})[String(p.id)])return;
     const i = idx.get(String(p.id));
     if(i === undefined){ idx.set(String(p.id), DB.products.length); DB.products.push(p); return; }
     const cur = DB.products[i] || {};
     const ct = Date.parse(cur.updatedAt || cur.changedAt || 0);
     const nt = Date.parse(p.updatedAt || p.changedAt || 0);
+    if(cur._gvCatalogVersion && (Number(p._gvCatalogVersion)||0)<cur._gvCatalogVersion){
+      if((nt && (!ct || nt > ct)) || (!nt && !ct))
+        DB.products[i]={...cur,stock:typeof p.stock==='number' && Number.isFinite(p.stock)?p.stock:cur.stock};
+      return;
+    }
     if(nt && (!ct || nt > ct)) DB.products[i] = p;
     else if(!nt && !ct) DB.products[i] = p;
   });
@@ -121,6 +127,22 @@ function isEmptyCatalog(list){
   return true;
 }
 function isEmptyList(list){ return !Array.isArray(list) || !list.length; }
+// Preserve acknowledged product cards when an older device sends a whole catalog.
+// Stock remains governed by the pre-existing synchronization path.
+function protectAcknowledgedProducts(incoming){
+  const tombstones=DB._gvDeletedProducts||{};
+  const out=incoming.filter(p=>!p || !tombstones[String(p.id)]), positions=new Map(out.map((p,i)=>[String(p && p.id),i]));
+  for(const current of (DB.products||[])){
+    if(!current || !current._gvCatalogVersion)continue;
+    const i=positions.get(String(current.id));
+    if(i===undefined){positions.set(String(current.id),out.length);out.push(current);continue;}
+    const old=out[i];
+    if((Number(old._gvCatalogVersion)||0)<current._gvCatalogVersion){
+      out[i]={...current,stock:typeof old.stock==='number' && Number.isFinite(old.stock)?old.stock:current.stock};
+    }
+  }
+  return out;
+}
 function keepNewest(a, b){
   const ta = Date.parse(a || 0), tb = Date.parse(b || 0);
   if(tb && (!ta || tb > ta)) return b;
@@ -362,10 +384,54 @@ const server = http.createServer(async (req, res)=>{
       if(isEmptyCatalog(db.products) && !isEmptyCatalog(DB.products)){ db.products = DB.products; guarded = true; }
       if(isEmptyList(db.sales) && !isEmptyList(DB.sales)){ db.sales = DB.sales; guarded = true; }
       if(isEmptyList(db.customers) && !isEmptyList(DB.customers)){ db.customers = DB.customers; guarded = true; }
+      db.products = protectAcknowledgedProducts(db.products);
+      db._gvDeletedProducts = DB._gvDeletedProducts || {};
       if(guarded) logChange(me, 'save-guard', 'пустая база с устройства не затёрла общую');
       DB = db; bump();
       logChange(me, 'save', 'товаров '+db.products.length+', чеков '+db.sales.length);
       return json(res, 200, {ok:true, rev:REV});
+    }
+
+    /* A single product is acknowledged only after its JSON snapshot is saved. */
+    if(p === '/api/product/save' && req.method === 'POST'){
+      const b=await readBody(req, 4*1024*1024), product=b.product, expected=b.expected;
+      const keys=['name','cat','img','price','cost','stock','sku','barcode'];
+      if(!product || typeof product.id!=='string' || !product.id || !product.name || typeof product.name!=='string' ||
+        typeof product.sku!=='string' || !product.sku.trim() || !Number.isFinite(product.price) || product.price<=0 ||
+        !Number.isFinite(product.cost) || product.cost<0 || !Number.isSafeInteger(product.stock))
+        return json(res,400,{ok:false,msg:'Проверьте название, артикул, цену и остаток'});
+      if((DB._gvDeletedProducts||{})[product.id])return json(res,409,{ok:false,msg:'Этот товар уже удалён. Обновите каталог.'});
+      const current=(DB.products||[]).find(p=>String(p.id)===product.id);
+      const duplicate=(DB.products||[]).find(p=>String(p.id)!==product.id && String(p.sku||'').trim().toLowerCase()===product.sku.trim().toLowerCase());
+      const skuChanged=!current || String(current.sku||'').trim().toLowerCase()!==product.sku.trim().toLowerCase();
+      if(duplicate && skuChanged)return json(res,409,{ok:false,msg:'Такой артикул уже существует'});
+      if(current && keys.every(k=>JSON.stringify(current[k]??'')===JSON.stringify(product[k]??'')))return json(res,200,{ok:true,product:current});
+      if(current && !expected){
+        return json(res,409,{ok:false,msg:'Товар с этим идентификатором уже существует'});
+      }
+      if(expected && (!current || keys.some(k=>JSON.stringify(current[k]??'')!==JSON.stringify(expected[k]??''))))
+        return json(res,409,{ok:false,msg:'Товар изменился на другом устройстве. Обновите карточку и повторите.'});
+      const updated={...(current||{}),...Object.fromEntries(keys.map(k=>[k,product[k]??''])),id:product.id,
+        _gvCatalogVersion:(Number(current && current._gvCatalogVersion)||0)+1};
+      const next={...DB,products:(DB.products||[]).slice()};
+      const idx=next.products.findIndex(p=>String(p.id)===product.id);
+      if(idx<0)next.products.push(updated);else next.products[idx]=updated;
+      if(writeJsonAtomic(FILE_DB,next)===false)return json(res,503,{ok:false,msg:'Не удалось сохранить товар на сервере'});
+      DB=next;REV++;logChange(me,'product-save','товар '+product.id);
+      return json(res,200,{ok:true,product:updated,rev:REV});
+    }
+
+    if(p === '/api/product/delete' && req.method === 'POST'){
+      const b=await readBody(req,4*1024*1024),expected=b.expected;
+      if(!expected || typeof expected.id!=='string')return json(res,400,{ok:false,msg:'Не указан товар'});
+      const current=(DB.products||[]).find(p=>String(p.id)===expected.id);
+      if(!current && (DB._gvDeletedProducts||{})[expected.id])return json(res,200,{ok:true});
+      const keys=['name','cat','img','price','cost','stock','sku','barcode'];
+      if(!current || keys.some(k=>JSON.stringify(current[k]??'')!==JSON.stringify(expected[k]??'')))return json(res,409,{ok:false,msg:'Товар изменился на другом устройстве. Обновите каталог.'});
+      const next={...DB,products:DB.products.filter(p=>String(p.id)!==expected.id),_gvDeletedProducts:{...(DB._gvDeletedProducts||{}),[expected.id]:true}};
+      if(writeJsonAtomic(FILE_DB,next)===false)return json(res,503,{ok:false,msg:'Не удалось сохранить изменение на сервере'});
+      DB=next;REV++;logChange(me,'product-delete','товар '+expected.id);
+      return json(res,200,{ok:true,rev:REV});
     }
 
     /* --- чеки: по одному, можно и изменить, и удалить ---

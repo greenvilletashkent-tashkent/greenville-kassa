@@ -2885,9 +2885,19 @@ function renderInventory(){
 
   document.querySelectorAll('[data-receive]').forEach(b=>b.onclick=()=> openReceiveForm(b.dataset.receive));
   document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=> openProductForm(b.dataset.edit));
-  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=async ()=>{
     if(confirm('Удалить товар из каталога?')){
-      DB.products = DB.products.filter(x=>x.id!==b.dataset.del); save(); renderInventory(); toast('Товар удалён');
+      const current=DB.products.find(x=>String(x.id)===String(b.dataset.del));
+      if(!current || typeof window.cloudDeleteProduct!=='function'){toast('Нет подтверждения сервера. Товар не удалён.',true);return;}
+      b.disabled=true;
+      try{
+        const result=await window.cloudDeleteProduct(JSON.parse(JSON.stringify(current)));
+        if(!result || !result.ok){toast((result&&result.msg)||'Нет подтверждения сервера. Товар не удалён.',true);return;}
+        DB.products=DB.products.filter(x=>String(x.id)!==String(current.id));window.DB=DB;
+        try{localStorage.setItem('greenville_pos_v1',JSON.stringify(DB));}catch(e){}
+        renderInventory();renderPos();toast('Удаление подтверждено сервером');
+      }catch(e){toast('Нет подтверждения сервера. Проверьте каталог перед повтором.',true);}
+      finally{b.disabled=false;}
     }
   });
 }
@@ -3449,10 +3459,14 @@ function closeModals(){
 }
 
 /* --- product form --- */
-let editingId = null;
+let editingId = null, editingBase = null, productAttemptId = null, productSaving = false, productFormGeneration = 0;
 function openProductForm(id=null){
+  productFormGeneration++;
   editingId = id;
   const p = id ? DB.products.find(x=>x.id===id) : {name:'',cat:CATEGORIES[0],emoji:'🌿',price:'',cost:'',stock:0,sku:''};
+  if(!p){toast('Товар не найден. Обновите каталог.',true);return;}
+  editingBase=id?JSON.parse(JSON.stringify(p)):null;
+  productAttemptId=id || (globalThis.crypto && crypto.randomUUID ? 'p'+crypto.randomUUID() : uid('p'));
   document.getElementById('formTitle').textContent = id ? 'Изменить товар' : 'Новый товар';
   document.getElementById('formBody').innerHTML = `
     <label>Название<input id="f-name" type="text" value="${p.name}" placeholder="Например, Спатифиллум" required></label>
@@ -3475,27 +3489,46 @@ function openProductForm(id=null){
   setTimeout(()=>document.getElementById('f-name').focus(), 80);
 }
 
-function saveProduct(){
+async function saveProduct(){
+  if(productSaving)return;
   const name = document.getElementById('f-name').value.trim();
   const price = +document.getElementById('f-price').value;
   if(!name){ toast('Укажите название', true); return; }
   if(!price){ toast('Укажите цену', true); return; }
+  const skuInput=document.getElementById('f-sku');
+  if(!skuInput.value.trim())skuInput.value='SKU-'+productAttemptId.replace(/[^a-zA-Z0-9]/g,'').slice(-12);
   const data = {
     name, cat: document.getElementById('f-cat').value,
     img: document.getElementById('f-img').value,
     price, cost: +document.getElementById('f-cost').value || 0,
     stock: +document.getElementById('f-stock').value || 0,
-    sku: document.getElementById('f-sku').value.trim() || ('SKU-' + Math.floor(Math.random()*9000+1000)),
+    sku: skuInput.value.trim(),
     barcode: (document.getElementById('f-barcode')?.value || '').trim()
   };
-  if(editingId){
-    Object.assign(DB.products.find(x=>x.id===editingId), data);
-    toast('Товар обновлён');
-  } else {
-    DB.products.push({id:uid('p'), ...data});
-    toast('Товар добавлен');
-  }
-  save(); closeModals(); renderInventory(); if(document.getElementById('view-pos').classList.contains('active')) renderPos();
+  if(!Number.isSafeInteger(data.stock) || !Number.isFinite(data.cost) || data.cost<0){toast('Проверьте себестоимость и остаток',true);return;}
+  if(typeof window.cloudSaveProduct!=='function'){toast('Нет соединения с сервером. Товар не сохранён.',true);return;}
+  const attempt={id:productAttemptId,...data}, captured=JSON.stringify(data), generation=productFormGeneration;
+  productSaving=true;
+  try{
+    const result=await window.cloudSaveProduct(attempt,editingBase);
+    if(!result || !result.ok || !result.product){toast((result && result.msg)||'Нет подтверждения сервера. Проверьте соединение и повторите.',true);return;}
+    const idx=DB.products.findIndex(p=>String(p.id)===String(result.product.id));
+    if(idx<0)DB.products.push(result.product);else DB.products[idx]=result.product;
+    window.DB=DB;
+    try{localStorage.setItem('greenville_pos_v1',JSON.stringify(DB));}catch(e){}
+    const form=document.getElementById('f-name');
+    if(form && generation===productFormGeneration){
+      const current={name:form.value.trim(),cat:document.getElementById('f-cat').value,img:document.getElementById('f-img').value,
+        price:+document.getElementById('f-price').value,cost:+document.getElementById('f-cost').value||0,stock:+document.getElementById('f-stock').value||0,
+        sku:document.getElementById('f-sku').value.trim()||data.sku,barcode:(document.getElementById('f-barcode')?.value||'').trim()};
+      editingId=result.product.id;editingBase=JSON.parse(JSON.stringify(result.product));
+      if(JSON.stringify(current)===captured)closeModals();
+      else toast('Товар сохранён; новые изменения в форме ещё не сохранены.',true);
+    }
+    renderInventory();if(document.getElementById('view-pos').classList.contains('active'))renderPos();
+    toast('Товар подтверждён сервером');
+  }catch(e){toast('Нет подтверждения сервера. Проверьте соединение и повторите.',true);}
+  finally{productSaving=false;}
 }
 
 /* --- receive stock --- */
@@ -5161,6 +5194,23 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     }).catch(()=> false);
   }
 
+  window.cloudSaveProduct = async function(product,expected){
+    if(!conf || !token)return {ok:false,msg:'Нужен вход на сервере. Товар не сохранён.'};
+    window.__gvProductWriteEpoch=(window.__gvProductWriteEpoch||0)+1;
+    window.__gvProductWriteActive=(window.__gvProductWriteActive||0)+1;
+    try{return await api('POST','/api/product/save',{product,expected});}
+    catch(e){return {ok:false,msg:'Нет подтверждения сервера. Проверьте соединение и повторите.'};}
+    finally{window.__gvProductWriteActive--;window.__gvProductWriteEpoch=(window.__gvProductWriteEpoch||0)+1;}
+  };
+  window.cloudDeleteProduct = async function(expected){
+    if(!conf || !token)return {ok:false,msg:'Нужен вход на сервере.'};
+    window.__gvProductWriteEpoch=(window.__gvProductWriteEpoch||0)+1;
+    window.__gvProductWriteActive=(window.__gvProductWriteActive||0)+1;
+    try{return await api('POST','/api/product/delete',{expected});}
+    catch(e){return {ok:false,msg:'Нет подтверждения сервера. Проверьте каталог перед повтором.'};}
+    finally{window.__gvProductWriteActive--;window.__gvProductWriteEpoch=(window.__gvProductWriteEpoch||0)+1;}
+  };
+
   /** чеки, созданные/правленые на этом телефоне и ещё не подтверждённые сервером */
   const ownTouched = {};
   window.__cloudOwnTouch = function(id){ ownTouched[String(id)] = true; };
@@ -5266,8 +5316,10 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
   window.cloudSyncCatalog = function(){
     if(!conf || !token || catBusy) return Promise.resolve(false);
     catBusy = true;
+    const catalogEpoch=window.__gvProductWriteEpoch||0;
     return api('GET', '/api/catalog').then(o=>{
       catBusy = false;
+      if(window.__gvProductWriteActive || catalogEpoch!==(window.__gvProductWriteEpoch||0))return false;
       if(!o || !o.ok || !Array.isArray(o.products)) return false;
       let n = 0;
       try{ n = (typeof DB !== 'undefined' && DB && Array.isArray(DB.products)) ? DB.products.length : 0; }catch(e){ n = 0; }
@@ -5296,10 +5348,11 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
     busy = true;
     try{
       await push();
+      const catalogEpoch=window.__gvProductWriteEpoch||0;
       const o = await api('GET', '/api/data');
       if(o && o.ok){
         // пока ждём номер нового чека — базу не подменяем, иначе номер потеряется
-        if(!counterBusy && !counterLocal) applyServer(o);
+        if(!counterBusy && !counterLocal && !window.__gvProductWriteActive && catalogEpoch===(window.__gvProductWriteEpoch||0)) applyServer(o);
         lastOk = Date.now(); online = true; paint('ok');
         // каталог пуст, а товары на сервере есть — забираем список напрямую
         try{
