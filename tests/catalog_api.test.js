@@ -5,7 +5,7 @@ test('existing duplicate SKU remains editable; stale update and duplicate create
  const p={id:'a',name:'Old A',sku:'DUP',price:100,cost:50,stock:8,cat:'',img:'',barcode:'',updatedAt:'2026-11-01T00:00:00Z'},q={...p,id:'b',name:'Old B',stock:4};
  fs.writeFileSync(path.join(dir,'db.json'),JSON.stringify({products:[p,q],customers:[],sales:[],counter:1001,bonusPct:5}));
  const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
- const proc=spawn(process.execPath,['server.js'],{cwd:path.join(__dirname,'..'),env:{...process.env,ELECTRON_RUN_AS_NODE:'1',DATA_DIR:dir,HOST:'127.0.0.1',PORT:String(port),ADMIN_PASSWORD:'synthetic-only'},windowsHide:true,stdio:'ignore'});
+ const proc=spawn(process.execPath,['server.js'],{cwd:path.join(__dirname,'..'),env:{...process.env,ELECTRON_RUN_AS_NODE:'1',DATA_DIR:dir,HOST:'127.0.0.1',PORT:String(port),ADMIN_PASSWORD:'synthetic-only',GREENVILLE_EXPERIMENTAL_V3:'0'},windowsHide:true,stdio:'ignore'});
  const base='http://127.0.0.1:'+port;
  const call=async(path,method,body,token)=>{const r=await fetch(base+path,{method,headers:{'content-type':'application/json',...(token?{authorization:'Bearer '+token}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,body:await r.json()};};
  try{

@@ -15,6 +15,9 @@ const http = require('http');
 const fs   = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+// The protected protocol is the default. The opt-out is for isolated regression tests.
+const experimentalReceiptLedger = process.env.GREENVILLE_EXPERIMENTAL_V3 === '0'
+  ? null : require('./sync/receipt_ledger');
 
 /* ---------- настройки ---------- */
 const DIR      = __dirname;
@@ -41,6 +44,27 @@ const FILE_AUTH = path.join(DATA_DIR, 'staff.json');
 const FILE_RATE = path.join(DATA_DIR, 'rate.json');
 const FILE_LOG  = path.join(DATA_DIR, 'changes.log');
 const FILE_SESS = path.join(DATA_DIR, 'sessions.json');
+let experimentalStorageUncertain = false;
+
+function persistExperimentalDb(value){
+  const tmp=FILE_DB+'.'+process.pid+'.'+crypto.randomBytes(8).toString('hex')+'.tmp';
+  let fd=null,renamed=false;
+  try{
+    fd=fs.openSync(tmp,'wx',0o600);
+    fs.writeFileSync(fd,JSON.stringify(value));fs.fsyncSync(fd);fs.closeSync(fd);fd=null;
+    fs.renameSync(tmp,FILE_DB);renamed=true;
+    if(process.platform!=='win32'){
+      const dir=fs.openSync(DATA_DIR,'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}
+    }
+    return true;
+  }catch(error){
+    if(renamed)experimentalStorageUncertain=true;
+    const wrapped=new Error('Не удалось подтвердить запись на диск');wrapped.storageError=true;throw wrapped;
+  }finally{
+    if(fd!==null)try{fs.closeSync(fd);}catch(e){}
+    if(!renamed)try{fs.unlinkSync(tmp);}catch(e){}
+  }
+}
 
 /* пароль администратора для первого входа: только из окружения (не из .env-файла) */
 const CLOUD_PASS = String(process.env.ADMIN_PASSWORD || '').trim();
@@ -84,9 +108,18 @@ function writeJsonOnce(file, obj){
   fs.renameSync(tmp, file);
 }
 
-let DB   = readJson(FILE_DB, null);
+let DB;
+if(fs.existsSync(FILE_DB)){
+  try{
+    DB=JSON.parse(fs.readFileSync(FILE_DB,'utf8'));
+    if(!DB || typeof DB!=='object' || Array.isArray(DB) || !Array.isArray(DB.products) || !Array.isArray(DB.sales) || !Array.isArray(DB.customers))
+      throw new Error('Некорректная структура базы');
+  }catch(e){
+    console.error('Невозможно открыть существующую базу; запуск остановлен:',e.message);
+    process.exit(1);
+  }
+}else DB={products:[],customers:[],sales:[],counter:1001,bonusPct:5};
 let AUTH = readJson(FILE_AUTH, null);
-if(!DB)   DB   = {products:[], customers:[], sales:[], counter:1001, bonusPct:5};
 if(!AUTH) AUTH = {staff:[]};
 let REV = 0;
 let dbDirty = false;
@@ -192,6 +225,11 @@ function who(req){
   const s = sessions.get(t);
   if(!s) return null;
   if(Date.now() - s.at > TTL){ sessions.delete(t); try{ saveSessions(); }catch(e){} return null; }
+  if(experimentalReceiptLedger){
+    const current = (AUTH.staff || []).find(u => String(u.id) === String(s.id));
+    if(!current || current.active === false){ sessions.delete(t); try{ saveSessions(); }catch(e){} return null; }
+    s.role = current.role; s.name = current.name; s.login = current.login;
+  }
   // раз в час продлеваем отметку на диске, чтобы перезапуск сервиса не выбивал из кассы
   if(Date.now() - s.at > 3600*1000){ s.at = Date.now(); try{ saveSessions(); }catch(e){} }
   return s;
@@ -226,7 +264,7 @@ function logChange(actor, kind, info){
 
 /* ---------- утилиты ответов ---------- */
 function cors(){
-  return {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization,content-type','Access-Control-Allow-Methods':'GET,POST,PUT,OPTIONS'};
+  return {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization,content-type,x-gv-protocol','Access-Control-Allow-Methods':'GET,POST,PUT,OPTIONS'};
 }
 function json(res, code, obj){
   res.writeHead(code, Object.assign({'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}, cors()));
@@ -254,7 +292,7 @@ function serveFile(res, file){
 function safeJoin(root, urlPath){
   const clean = decodeURIComponent(urlPath.split('?')[0]).replace(/\/+$/,'') || '/';
   const full = path.normalize(path.join(root, clean));
-  return full.startsWith(root) ? full : null;
+  return full === root || full.startsWith(root + path.sep) ? full : null;
 }
 
 /* ---------- сервер ---------- */
@@ -265,7 +303,7 @@ const server = http.createServer(async (req, res)=>{
   if(req.method === 'OPTIONS'){ res.writeHead(204, cors()); return res.end(); }
 
   try{
-    if(url.indexOf('/api/health') === 0) return json(res, 200, {ok:true, app:'greenville-pos', ver:1, rev:REV, staff:(AUTH.staff||[]).length, at:new Date().toISOString()});
+    if(url.indexOf('/api/health') === 0) return json(res, 200, {ok:true, app:'greenville-pos', ver:1, receiptProtocol:experimentalReceiptLedger?1:0, rev:REV, staff:(AUTH.staff||[]).length, at:new Date().toISOString()});
 
     /* --- вход --- */
     if(p === '/api/login' && req.method === 'POST'){
@@ -335,9 +373,126 @@ const server = http.createServer(async (req, res)=>{
 
     const me = who(req);
     if(p.startsWith('/api/') && !me) return json(res, 401, {ok:false, msg:'Нужно войти'});
+    if(experimentalReceiptLedger && experimentalStorageUncertain && p.startsWith('/api/experimental/')) return json(res,503,{ok:false,msg:'Запись на диск не подтверждена; требуется перезапуск тестового сервера'});
+
+    if(experimentalReceiptLedger && p === '/api/experimental/capabilities' && req.method === 'GET'){
+      return json(res, 200, {ok:true, receiptProtocol:1});
+    }
+
+    if(experimentalReceiptLedger && (p==='/api/experimental/legacy-evidence' || p==='/api/experimental/legacy-decision'))
+      return json(res,410,{ok:false,msg:'Перенос старых локальных чеков отключён'});
+
+    if(experimentalReceiptLedger && p === '/api/experimental/session' && req.method === 'GET'){
+      return json(res, 200, {ok:true, id:me.id, login:me.login, name:me.name, role:me.role});
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/state' && req.method === 'GET'){
+      const products=(DB.products||[]).map(p=>{
+        if(me.role === 'admin') return p;
+        const safe={...p}; delete safe.cost; return safe;
+      });
+      const sales=me.role === 'admin' ? DB.sales : (DB.sales||[]).filter(s=>String(s.byId)===String(me.id)).map(s=>{
+        const safe={...s}; delete safe.cost; delete safe.profit;
+        safe.items=(safe.items||[]).map(i=>{const item={...i};delete item.cost;return item;});
+        return safe;
+      });
+      return json(res, 200, {ok:true, db:{products,sales,customers:DB.customers||[],counter:DB.counter,bonusPct:DB.bonusPct}, role:me.role});
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/receipt' && req.method === 'POST'){
+      const b = await readBody(req, 4*1024*1024);
+      if(!b.receipt || String(b.receipt.cashierId || '') !== String(me.id)) return json(res, 403, {ok:false, msg:'Чек принадлежит другому сотруднику'});
+      const state = Object.assign({}, DB, {operations:DB.operations || {}});
+      try{
+        const result = experimentalReceiptLedger.acceptReceipt(state, b.receipt, persistExperimentalDb, me);
+        DB = result.state;
+        if(!result.duplicate) REV++;
+        return json(res, 200, {ok:true, duplicate:result.duplicate, saleId:result.saleId});
+      }catch(error){
+        return json(res, error.storageError ? 503 : 409, {ok:false, msg:error.message});
+      }
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/receipt-change' && req.method === 'POST'){
+      const b=await readBody(req, 1024*1024);
+      if(!b.receipt || String(b.receipt.cashierId || '')!==String(me.id)) return json(res,403,{ok:false,msg:'Операция принадлежит другому сотруднику'});
+      const state=Object.assign({}, DB, {operations:DB.operations || {}});
+      try{
+        const result=experimentalReceiptLedger.changeReceipt(state,b.receipt,persistExperimentalDb,me);
+        DB=result.state;if(!result.duplicate)REV++;
+        return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});
+      }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/stock-add' && req.method === 'POST'){
+      const b=await readBody(req,1024*1024);
+      if(me.role!=='admin' || !b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Только администратор'});
+      const state=Object.assign({},DB,{operations:DB.operations||{}});
+      try{
+        const result=experimentalReceiptLedger.addStock(state,b.receipt,persistExperimentalDb,me);
+        DB=result.state;if(!result.duplicate)REV++;
+        return json(res,200,{ok:true,duplicate:result.duplicate});
+      }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/product-save' && req.method === 'POST'){
+      const b=await readBody(req,4*1024*1024);
+      if(!['admin','cashier'].includes(me.role) || !b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Нет доступа'});
+      const state=Object.assign({},DB,{operations:DB.operations||{}});
+      try{
+        const result=experimentalReceiptLedger.saveProduct(state,b.receipt,persistExperimentalDb,me);
+        DB=result.state;if(!result.duplicate)REV++;
+        return json(res,200,{ok:true,duplicate:result.duplicate});
+      }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/customer-add' && req.method === 'POST'){
+      const b=await readBody(req,1024*1024);
+      if(!b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Операция принадлежит другому сотруднику'});
+      const state=Object.assign({},DB,{operations:DB.operations||{}});
+      try{
+        const result=experimentalReceiptLedger.addCustomer(state,b.receipt,persistExperimentalDb,me);
+        DB=result.state;if(!result.duplicate)REV++;
+        return json(res,200,{ok:true,duplicate:result.duplicate});
+      }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/product-archive' && req.method === 'POST'){
+      const b=await readBody(req,1024*1024);
+      if(me.role!=='admin' || !b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Только администратор'});
+      const state=Object.assign({},DB,{operations:DB.operations||{}});
+      try{
+        const result=experimentalReceiptLedger.archiveProduct(state,b.receipt,persistExperimentalDb,me);
+        DB=result.state;if(!result.duplicate)REV++;
+        return json(res,200,{ok:true,duplicate:result.duplicate});
+      }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/product-import' && req.method === 'POST'){
+      const b=await readBody(req,32*1024*1024);
+      if(me.role!=='admin' || !b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Только администратор'});
+      const state=Object.assign({},DB,{operations:DB.operations||{}});
+      try{
+        const result=experimentalReceiptLedger.importProducts(state,b.receipt,persistExperimentalDb,me);
+        DB=result.state;if(!result.duplicate)REV++;
+        return json(res,200,{ok:true,duplicate:result.duplicate});
+      }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}
+    }
+
+    if(experimentalReceiptLedger && p === '/api/experimental/receipt-status' && req.method === 'POST'){
+      const b = await readBody(req, 4*1024*1024);
+      const receipt = b.receipt;
+      if(!receipt || String(receipt.cashierId || '') !== String(me.id)) return json(res, 403, {ok:false, msg:'Чек принадлежит другому сотруднику'});
+      const op = receipt && DB.operations && DB.operations[receipt.operationId];
+      if(!op) return json(res, 200, {ok:true, status:'absent'});
+      if(op.actorId && op.actorId !== me.id) return json(res, 403, {ok:false, msg:'Операция принадлежит другому сотруднику'});
+      const hash = experimentalReceiptLedger.receiptHash(receipt);
+      return json(res, 200, {ok:true, status:op.hash === hash ? 'accepted' : 'conflict', saleId:op.hash === hash ? op.saleId : undefined});
+    }
 
     /* --- вся база --- */
     if(url.indexOf('/api/data') === 0 && req.method === 'GET'){
+      if(experimentalReceiptLedger) return json(res, me.role==='admin'?409:403, {ok:false, msg:'Старый протокол отключён; обновите кассу'});
       return json(res, 200, {ok:true, rev:REV, at:new Date().toISOString(), db:DB, staff:(AUTH.staff||[]).map(x=>({id:x.id, login:x.login, name:x.name, role:x.role, active:x.active, created:x.created}))});
     }
 
@@ -345,7 +500,9 @@ const server = http.createServer(async (req, res)=>{
        Телефону нужен короткий список товаров: если общий ответ пришёл
        с пустым каталогом, устройство добирает товары этим запросом. */
     if(p === '/api/catalog' && req.method === 'GET'){
-      const list = Array.isArray(DB.products) ? DB.products : [];
+      if(experimentalReceiptLedger && req.headers['x-gv-protocol']!=='3')return json(res,409,{ok:false,msg:'Старый протокол отключён; обновите кассу'});
+      let list = Array.isArray(DB.products) ? DB.products : [];
+      if(experimentalReceiptLedger && me.role!=='admin')list=list.map(p=>{const safe={...p};delete safe.cost;return safe;});
       return json(res, 200, {ok:true, rev:REV, count:list.length, products:list});
     }
 
@@ -353,6 +510,7 @@ const server = http.createServer(async (req, res)=>{
        Нужно телефону: каталог на устройстве мог устареть, а товар на месте.
        Отдаём ровно один товар, всю базу наружу не выкладываем. */
     if(p === '/api/find' && req.method === 'GET'){
+      if(experimentalReceiptLedger && req.headers['x-gv-protocol']!=='3')return json(res,409,{ok:false,msg:'Старый протокол отключён; обновите кассу'});
       const code = String((url.split('code=')[1] || '').split('&')[0] || '').trim();
       const c = decodeURIComponent(code).trim();
       if(!c) return json(res, 400, {ok:false, msg:'Пустой код'});
@@ -364,12 +522,15 @@ const server = http.createServer(async (req, res)=>{
                 || list.find(x=> norm(x.barcode).endsWith(cl))
                 || list.find(x=> norm(x.sku).endsWith(cl))
                 || null;
-      return json(res, 200, {ok:true, product:prod});
+      let result=prod;
+      if(experimentalReceiptLedger && me.role!=='admin' && prod){result={...prod};delete result.cost;}
+      return json(res, 200, {ok:true, product:result});
     }
 
     /* --- сохранить всю базу --- */
     if(p === '/api/data' && req.method === 'PUT'){
       if(me.role !== 'admin') return json(res, 403, {ok:false, msg:'Изменять данные может администратор'});
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Полная замена базы отключена в экспериментальном режиме'});
       const b = await readBody(req, 32*1024*1024);
       const db = b.db;
       if(!db || typeof db !== 'object') return json(res, 400, {ok:false, msg:'Пустые данные'});
@@ -394,6 +555,7 @@ const server = http.createServer(async (req, res)=>{
 
     /* A single product is acknowledged only after its JSON snapshot is saved. */
     if(p === '/api/product/save' && req.method === 'POST'){
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Используйте защищённый протокол каталога'});
       const b=await readBody(req, 4*1024*1024), product=b.product, expected=b.expected;
       const keys=['name','cat','img','price','cost','stock','sku','barcode'];
       if(!product || typeof product.id!=='string' || !product.id || !product.name || typeof product.name!=='string' ||
@@ -422,6 +584,7 @@ const server = http.createServer(async (req, res)=>{
     }
 
     if(p === '/api/product/delete' && req.method === 'POST'){
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Используйте защищённый протокол каталога'});
       const b=await readBody(req,4*1024*1024),expected=b.expected;
       if(!expected || typeof expected.id!=='string')return json(res,400,{ok:false,msg:'Не указан товар'});
       const current=(DB.products||[]).find(p=>String(p.id)===expected.id);
@@ -438,6 +601,7 @@ const server = http.createServer(async (req, res)=>{
        Чек не перезаписывается «вслепую»: берём тот, что пришёл с устройства,
        и заменяем версию на сервере (так правка и пометка «удалён» видны всем). */
     if(p === '/api/sale' && req.method === 'POST'){
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Старый протокол чеков отключён в экспериментальном режиме'});
       const b = await readBody(req, 4*1024*1024);
       const s = b.sale;
       if(!s || !s.id) return json(res, 400, {ok:false, msg:'Пустой чек'});
@@ -463,6 +627,7 @@ const server = http.createServer(async (req, res)=>{
 
     /* --- только новые чеки (старый вариант, оставлен для совместимости) --- */
     if(p === '/api/push' && req.method === 'POST'){
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Старый протокол чеков отключён в экспериментальном режиме'});
       const b = await readBody(req, 4*1024*1024);
       const sales = Array.isArray(b.sales) ? b.sales : [];
       const have = new Set((DB.sales||[]).map(s=>String(s.id)));
@@ -478,6 +643,7 @@ const server = http.createServer(async (req, res)=>{
        У каждого телефона свой счётчик, поэтому номер выдаёт облако:
        два продавца одновременно не получат одинаковый номер. */
     if(p === '/api/nextid' && req.method === 'POST'){
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Старый протокол отключён'});
       DB.counter = Math.max(+DB.counter||1001, 1001) + 1;
       saveDb();
       return json(res, 200, {ok:true, counter:DB.counter, rev:REV});
@@ -486,6 +652,7 @@ const server = http.createServer(async (req, res)=>{
     /* --- правка ассортимента и настроек с любого логина ---
        Продавец тоже может добавить товар или изменить цену; данные сразу у всех. */
     if(p === '/api/edit' && req.method === 'POST'){
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Изменения каталога через старый протокол отключены в экспериментальном режиме'});
       const b = await readBody(req, 16*1024*1024);
       const m = b.meta || {};
       if(Array.isArray(m.products)) mergeProducts(m.products);
@@ -499,6 +666,7 @@ const server = http.createServer(async (req, res)=>{
 
     /* --- обновить только служебные данные (клиенты, скидка, счётчик) --- */
     if(p === '/api/meta' && req.method === 'POST'){
+      if(experimentalReceiptLedger) return json(res, 409, {ok:false, msg:'Старый протокол обновления данных отключён'});
       const b = await readBody(req, 8*1024*1024);
       if(Array.isArray(b.customers)) DB.customers = b.customers;
       if(b.counter) DB.counter = Math.max(+DB.counter||1001, +b.counter||0);
@@ -510,6 +678,7 @@ const server = http.createServer(async (req, res)=>{
 
     /* --- пароли сотрудников: чтобы вход работал и без интернета --- */
     if(p === '/api/passes' && req.method === 'GET'){
+      if(experimentalReceiptLedger && me.role !== 'admin') return json(res, 403, {ok:false, msg:'Только администратор'});
       return json(res, 200, {ok:true, staff:(AUTH.staff||[]).map(x=>({id:x.id, login:x.login, name:x.name, role:x.role, active:x.active, created:x.created, pass:x.pass}))});
     }
 
@@ -566,7 +735,7 @@ const server = http.createServer(async (req, res)=>{
       const f2 = path.join(DIR, 'Greenville-касса.html');
       return serveFile(res, fs.existsSync(f1) ? f1 : f2);
     }
-    const file = safeJoin(DIR, p);
+    const file = safeJoin(PUBLIC, p.startsWith('/public/') ? p.slice('/public'.length) : p);
     if(file && fs.existsSync(file) && fs.statSync(file).isFile()) return serveFile(res, file);
     return serveFile(res, fs.existsSync(path.join(PUBLIC,'index.html')) ? path.join(PUBLIC,'index.html') : path.join(DIR, 'Greenville-касса.html'));
   }catch(e){
