@@ -189,12 +189,28 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         wait_for(lambda:dev.evaluate("typeof window.__gvExperimentalCheckout==='function'"))
         assert dev.evaluate("typeof window.__gvExperimentalSync!=='function' && JSON.parse(localStorage.getItem('greenville_pos_v1')).sales.some(s=>s.id==='legacy-unconfirmed')")
         assert dev.evaluate("!!document.querySelector('#gvLegacyTransition') && !!document.querySelector('#gvLegacyTransition button')")
+        for width,height in [(360,800),(1280,800)]:
+            dev.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':height,'deviceScaleFactor':1,'mobile':width<500})
+            assert dev.evaluate("[...document.querySelectorAll('#gvLegacyTransition button')].every(b=>b.getBoundingClientRect().height>=48 && getComputedStyle(b).borderTopWidth!=='0px' && getComputedStyle(b).backgroundColor!=='rgba(0, 0, 0, 0)') && document.documentElement.scrollWidth<=innerWidth")
+        assert len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==8
+        dev.call('Page.setDownloadBehavior',{'behavior':'allow','downloadPath':str(root)})
+        dev.evaluate("[...document.querySelectorAll('#gvLegacyTransition button')].find(b=>b.textContent.includes('Скачать')).click()")
+        download=root/'greenville-local-backup.json';wait_for(download.exists)
+        wait_for(lambda:download.stat().st_size>0)
+        assert any(s['id']=='legacy-unconfirmed' for s in json.loads(download.read_text(encoding='utf8'))['sales'])
+        dev.evaluate("window.confirm=()=>false;[...document.querySelectorAll('#gvLegacyTransition button')].find(b=>b.textContent.includes('перейти')).click()")
+        wait_for(lambda:dev.evaluate("![...document.querySelectorAll('#gvLegacyTransition button')].find(b=>b.textContent.includes('перейти')).disabled"))
+        assert dev.evaluate("localStorage.getItem('greenville_legacy_isolated_v1')===null && JSON.parse(localStorage.getItem('greenville_pos_v1')).sales.some(s=>s.id==='legacy-unconfirmed')")
         assert len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==8
         dev.evaluate("window.confirm=()=>true;[...document.querySelectorAll('#gvLegacyTransition button')].find(b=>b.textContent.includes('перейти')).click()")
         wait_for(lambda:dev.evaluate("localStorage.getItem('greenville_legacy_isolated_v1')==='1' && typeof window.__gvExperimentalSync==='function'"))
         assert dev.evaluate("new Promise((resolve,reject)=>{const r=indexedDB.open('greenville_legacy_archives_v1');r.onerror=()=>reject(r.error);r.onsuccess=()=>{const db=r.result,q=db.transaction('archives').objectStore('archives').getAll();q.onsuccess=()=>resolve(q.result.some(x=>JSON.parse(x.snapshot).sales.some(s=>s.id==='legacy-unconfirmed')));q.onerror=()=>reject(q.error)}})")
         assert len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==8
-        print('legacy data archived after admin confirmation without replay: passed')
+        print('legacy download, cancelled confirmation and admin archive without replay: passed')
+        dev.evaluate("window.greenvilleLegacyTransition.show([{}],{role:'cashier'},async()=>({ok:false}),()=>{})")
+        assert dev.evaluate("[...document.querySelectorAll('#gvLegacyTransition button')].some(b=>b.textContent.includes('Войти как администратор') && b.getBoundingClientRect().height>=48 && getComputedStyle(b).backgroundColor!=='rgba(0, 0, 0, 0)')")
+        dev.evaluate("document.querySelector('#gvLegacyTransition').remove()")
+        print('transition buttons styled for administrator and cashier: passed')
     finally:
         if dev2:
             try:dev2.call('Browser.close')
