@@ -5595,6 +5595,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             }
             const n=await updateQueueStatus();
             paint(n?'off':'ok',n?'Ожидают отправки: '+n:'Общая база');
+            return !!(o && o.ok && o.db);
           };
           window.__gvChangeReceipt=async(saleId,deleted)=>{
             if(saving)return;
@@ -5710,11 +5711,10 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             }catch(error){toast('Не удалось сохранить импорт: '+error.message,true);}
             finally{saving=false;}
           };
-          window.__gvCloudVerificationPending=false;
         }
       }
       if(window.__gvExperimentalCheckout){
-        if(window.__gvExperimentalSync)await window.__gvExperimentalSync();
+        if(window.__gvExperimentalSync && await window.__gvExperimentalSync())window.__gvCloudVerificationPending=false;
         return;
       }
       await push();

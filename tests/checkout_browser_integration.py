@@ -207,6 +207,16 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         assert dev.evaluate("new Promise((resolve,reject)=>{const r=indexedDB.open('greenville_legacy_archives_v1');r.onerror=()=>reject(r.error);r.onsuccess=()=>{const db=r.result,q=db.transaction('archives').objectStore('archives').getAll();q.onsuccess=()=>resolve(q.result.some(x=>JSON.parse(x.snapshot).sales.some(s=>s.id==='legacy-unconfirmed')));q.onerror=()=>reject(q.error)}})")
         assert len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==8
         print('legacy download, cancelled confirmation and admin archive without replay: passed')
+        if dev.evaluate("!document.querySelector('#loginScreen').hidden"):
+            dev.evaluate("document.querySelector('#loginName').value='admin';document.querySelector('#loginPass').value='synthetic-only';document.querySelector('#loginForm').requestSubmit()")
+            wait_for(lambda:dev.evaluate("CURRENT && document.querySelector('#loginScreen').hidden"))
+        assert dev.evaluate("window.__gvCloudVerificationPending!==true"),'payment remains blocked after re-login following transition'
+        stock_before=json.loads((db/'db.json').read_text(encoding='utf8'))['products'][0]['stock']
+        dev.evaluate("addToCart('p1');document.querySelector('#btnCheckout').click();document.querySelector('#btnCheckout').click()")
+        wait_for(lambda:len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==9)
+        time.sleep(1)
+        after=json.loads((db/'db.json').read_text(encoding='utf8'));assert len(after['sales'])==9 and after['products'][0]['stock']==stock_before-1
+        print('post-transition re-login and repeated checkout: passed')
         dev.evaluate("window.greenvilleLegacyTransition.show([{}],{role:'cashier'},async()=>({ok:false}),()=>{})")
         assert dev.evaluate("[...document.querySelectorAll('#gvLegacyTransition button')].some(b=>b.textContent.includes('Войти как администратор') && b.getBoundingClientRect().height>=48 && getComputedStyle(b).backgroundColor!=='rgba(0, 0, 0, 0)')")
         dev.evaluate("document.querySelector('#gvLegacyTransition').remove()")
