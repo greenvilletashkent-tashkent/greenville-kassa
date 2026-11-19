@@ -2298,8 +2298,17 @@ function clampMoney(v, total){
 
 function renderPos(){ renderCatChips(); renderProductGrid(); renderCart(); renderHoldList(); }
 
-function checkout(){
+async function checkout(){
   if(!cart.length) return;
+  if(window.__gvCheckoutGuardBusy)return;
+  window.__gvCheckoutGuardBusy=true;
+  try{
+    const response=await fetch('/api/health',{cache:'no-store'});
+    const health=await response.json();
+    if(!response.ok || !health || health.app!=='greenville-pos')throw new Error('invalid health');
+    if(health.receiptProtocol===1){alert('Касса обновлена. Перезагрузите страницу');return;}
+  }catch(e){toast('Нет связи с сервером. Продажа не проведена.',true);return;}
+  finally{window.__gvCheckoutGuardBusy=false;}
   const counterBefore = DB.counter++;   /* номер чека фиксируем один раз */
   const t = cartTotals();
   // списываем остатки
