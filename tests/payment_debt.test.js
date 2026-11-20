@@ -54,7 +54,26 @@ test('overpayment, conflicting replay and unauthorized repayment rejected',()=>{
  assert.throws(()=>repayDebt(s,{operationId:crypto.randomUUID(),saleId:id,method:'cash',amount:1},()=>true,{id:'x',role:'other'}),/forbidden/);
  const op={operationId:crypto.randomUUID(),saleId:id,method:'cash',amount:1},done=repayDebt(s,op,()=>true,actor).state;
  assert.throws(()=>repayDebt(done,{...op,amount:2},()=>true,actor),/conflict/);
- assert.throws(()=>changeReceipt(done,{operationId:crypto.randomUUID(),saleId:id,kind:'void',revision:1},()=>true,{id:'admin',role:'admin'}),/reconciliation/);
+ assert.throws(()=>changeReceipt(done,{operationId:crypto.randomUUID(),saleId:id,kind:'void',revision:1,financialRevision:2},()=>true,{id:'admin',role:'admin'}),/reconciliation/);
+});
+test('fully unpaid debt may be cancelled once by admin and restored; stock and debt remain consistent',()=>{
+ const admin={id:'admin',role:'admin'},start=acceptReceipt(seed(),create({debt:300}),()=>true,actor).state,sale=start.sales[0];
+ const op={operationId:crypto.randomUUID(),saleId:sale.id,kind:'void',revision:1,financialRevision:1};
+ assert.throws(()=>changeReceipt(start,op,()=>true,actor),/forbidden/);
+ const done=changeReceipt(start,op,()=>true,admin).state;
+ assert.equal(done.products[0].stock,10);assert.equal(done.sales[0].debtOutstanding,0);assert.equal(done.sales[0].deleted,true);assert.equal(done.sales[0].financialEvents[0].debtDelta,-300);
+ assert.equal(changeReceipt(done,op,()=>{throw Error('duplicate write')},admin).duplicate,true);
+ assert.throws(()=>changeReceipt(done,{...op,operationId:crypto.randomUUID()},()=>true,admin),/revision/);
+ const restore={operationId:crypto.randomUUID(),saleId:sale.id,kind:'restore',revision:2,financialRevision:2};const restored=changeReceipt(done,restore,()=>true,admin).state;
+ assert.equal(restored.products[0].stock,9);assert.equal(restored.sales[0].debtOutstanding,300);assert.equal(restored.sales[0].financialEvents[1].debtDelta,300);
+});
+test('debt cancellation rejects stale financial state and partially paid sales',()=>{
+ const admin={id:'admin',role:'admin'},start=acceptReceipt(seed(),create({debt:300}),()=>true,actor).state,id=start.sales[0].id;
+ const paid=repayDebt(start,{operationId:crypto.randomUUID(),saleId:id,method:'cash',amount:10},()=>true,actor).state;
+ const op={operationId:crypto.randomUUID(),saleId:id,kind:'void',revision:1,financialRevision:1};
+ assert.throws(()=>changeReceipt(paid,op,()=>true,admin),/financial revision/);
+ assert.throws(()=>changeReceipt(paid,{...op,financialRevision:2},()=>true,admin),/reconciliation/);
+ assert.equal(paid.products[0].stock,9);assert.equal(paid.sales[0].debtOutstanding,290);
 });
 test('storage failure does not mutate sale, debt, stock or operation ledger',()=>{
  const s=acceptReceipt(seed(),create({debt:300}),()=>true,actor).state,before=JSON.stringify(s);

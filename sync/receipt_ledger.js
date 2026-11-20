@@ -125,7 +125,16 @@ function changeReceipt(state, change, persist, actor={}) {
   }
   const next=structuredClone(state), sale=next.sales.find(s=>String(s.id)===String(change.saleId));
   if(!sale || !sale.operationId)throw new Error('sale not found or legacy sale');
-  if(sale.payments && sale.payments.debt>0 && change.kind!=='note')throw new Error('payment breakdown requires reconciliation');
+  const debtSale=!!(sale.payments && sale.payments.debt>0);
+  if(debtSale && change.kind!=='note'){
+    if(!['void','restore'].includes(change.kind))throw new Error('payment breakdown requires reconciliation');
+    if(actor.role!=='admin')throw new Error('forbidden');
+    if(!Number.isSafeInteger(change.financialRevision)||change.financialRevision!==(sale.financialRevision||1))throw new Error('financial revision conflict');
+    const p=sale.payments;
+    if(p.cash!==0||p.terminal!==0||p.owner_card!==0||(sale.debtPayments||[]).length||(sale.refunds||[]).length||(sale.debtCorrections||[]).length)throw new Error('payment breakdown requires reconciliation');
+    if(change.kind==='void' && sale.debtOutstanding!==p.debt)throw new Error('payment breakdown requires reconciliation');
+    if(change.kind==='restore' && (sale.debtOutstanding!==0 || sale.voidedDebtOutstanding!==p.debt))throw new Error('payment breakdown requires reconciliation');
+  }
   if(actor.role!=='admin' && (['void','restore'].includes(change.kind) || (change.kind==='edit' && sale.paid)))throw new Error('forbidden');
   if(actor.role!=='admin' && String(sale.byId)!==String(actor.id))throw new Error('forbidden');
   if((sale.revision||1)!==change.revision)throw new Error('sale revision conflict');
@@ -189,8 +198,9 @@ function changeReceipt(state, change, persist, actor={}) {
   const eventAt=new Date().toISOString();
   if(sale.paid){
     const snapshot=structuredClone({total:sale.total,cost:sale.cost,profit:sale.profit,items:sale.items,subtotal:sale.subtotal,discountTotal:sale.discountTotal,discountPct:sale.discountPct,cashier:sale.cashier});
-    sale.financialEvents=[...(sale.financialEvents||[]),{kind:deleting?'void':'restore',at:eventAt,operationId:change.operationId,byId:actor.id,snapshot}];
+    sale.financialEvents=[...(sale.financialEvents||[]),{kind:deleting?'void':'restore',at:eventAt,operationId:change.operationId,byId:actor.id,snapshot,...(debtSale?{debtDelta:(deleting?-1:1)*sale.payments.debt}:{})}];
   }
+  if(debtSale){if(deleting){sale.voidedDebtOutstanding=sale.debtOutstanding;sale.debtOutstanding=0;}else{sale.debtOutstanding=sale.voidedDebtOutstanding;delete sale.voidedDebtOutstanding;}}
   sale.deleted=deleting;sale.revision=(sale.revision||1)+1;
   if(sale.payments)sale.financialRevision=(sale.financialRevision||1)+1;
   sale.updatedAt=eventAt;

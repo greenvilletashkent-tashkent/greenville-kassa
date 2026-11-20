@@ -39,6 +39,7 @@
           }
         }
         for(const p of s.debtPayments||[]){if(inPeriod(p.at) && ['cash','terminal','owner_card'].includes(p.method)){out[p.method]+=p.amount;out.repayments+=p.amount;}}
+        for(const e of s.financialEvents||[])if(inPeriod(e.at) && Number.isSafeInteger(e.debtDelta))out.debt+=e.debtDelta;
       }else if(inPeriod(s.date)){
         if(s.pay==='cash'||!s.pay)out.cash+=s.total||0;
         else if(s.pay==='card')out.terminal+=s.total||0;

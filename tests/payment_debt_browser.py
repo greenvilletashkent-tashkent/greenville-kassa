@@ -133,6 +133,26 @@ with tempfile.TemporaryDirectory(prefix='gv-debt-ui-',ignore_cleanup_errors=True
         a.evaluate("window.__gvExperimentalSync()")
         assert len(state()['sales'])==7 and state()['products'][0]['stock']==43 and state()['sales'][-1]['debtOutstanding']==300
         print('offline debt sale survives reload and posts once: passed')
+        a.evaluate('window.__gvExperimentalSync()');wait_for(lambda:a.evaluate('DB.sales.length===7'))
+        sale_id=state()['sales'][5]['id'];prior_stock=state()['products'][0]['stock']
+        a.evaluate('window.confirm=()=>true;setSaleDeleted('+json.dumps(sale_id)+',true)')
+        wait_for(lambda:state()['sales'][5].get('deleted') is True)
+        current=state();assert current['sales'][5]['debtOutstanding']==0 and current['products'][0]['stock']==prior_stock+1
+        a.evaluate('window.__gvExperimentalSync()');wait_for(lambda:a.evaluate("DB.sales.some(s=>String(s.id)==="+json.dumps(str(sale_id))+" && s.deleted)"))
+        a.evaluate('setSaleDeleted('+json.dumps(sale_id)+',false)')
+        wait_for(lambda:state()['sales'][5].get('deleted') is False)
+        current=state();assert current['sales'][5]['debtOutstanding']==300 and current['products'][0]['stock']==prior_stock
+        print('unpaid debt cancelled and restored through UI without double stock change: passed')
+        a.evaluate("(async()=>{const q=await new ReceiptOutbox().open();for(let i=0;i<4;i++)await q.add({operationId:crypto.randomUUID(),cashierId:String(CURRENT.id),kind:'void',saleId:"+json.dumps(str(sale_id))+",revision:1});q.close();await window.__gvExperimentalSync()})()")
+        wait_for(lambda:a.evaluate("(async()=>{const q=await new ReceiptOutbox().open();const n=(await q.list()).filter(e=>e.status==='conflict'&&JSON.parse(e.body).kind==='void').length;q.close();return n===4})()"))
+        a.evaluate("document.querySelector('#cloudChip').click()")
+        wait_for(lambda:a.evaluate("document.body.innerText.includes('Конфликты финансовых операций')"))
+        assert a.evaluate("document.body.innerText.includes('чек №"+str(sale_id)+"')")
+        a.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='Отменить операцию').click()")
+        wait_for(lambda:a.evaluate("(async()=>{const q=await new ReceiptOutbox().open();const n=(await q.list()).filter(e=>e.status==='resolved_cancelled').length;q.close();return n===1})()"))
+        current=state();assert current['sales'][5]['deleted'] is False and current['products'][0]['stock']==prior_stock
+        a.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='Закрыть').click()")
+        print('conflicted deletion is shown and archived only after confirmation: passed')
         a.evaluate("""(()=>{const snap={total:300000,cost:100000,profit:200000,subtotal:300000,discountTotal:0,items:[{id:'p',name:'Тест',qty:1,price:300000,cost:100000}],cashier:'Тест'};DB.sales=[{...snap,id:'fixture',paid:true,date:'2026-11-01T05:00:00Z',payments:{cash:100000,terminal:150000,owner_card:50000,debt:0},debtOutstanding:0,debtPayments:[],refunds:[{at:'2026-11-02T05:00:00Z',amounts:{cash:40000,terminal:30000,owner_card:0}},{at:'2026-11-03T05:00:00Z',amounts:{cash:0,terminal:0,owner_card:10000}}],financialEvents:[{kind:'void',at:'2026-11-04T05:00:00Z',snapshot:snap}]}];reportPeriod='custom';document.querySelector('#reportFrom').value='2026-11-01';document.querySelector('#reportTo').value='2026-11-01';renderReports()})()""")
         assert a.evaluate("document.querySelector('#chartTotal').textContent.includes('300') && document.querySelector('#payBreakdown').textContent.includes('150')")
         a.evaluate("document.querySelector('#reportFrom').value='2026-11-02';document.querySelector('#reportTo').value='2026-11-02';renderReports()")

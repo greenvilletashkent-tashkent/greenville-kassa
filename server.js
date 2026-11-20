@@ -416,7 +416,7 @@ const server = http.createServer(async (req, res)=>{
     if(experimentalReceiptLedger && p === '/api/experimental/debts' && req.method === 'GET'){
       const debts=(DB.sales||[]).filter(s=>s.payments && (s.payments.debt>0 || (s.debtPayments||[]).length || (s.debtCorrections||[]).some(c=>(c.before?.payments?.debt||0)>0))).map(s=>{
         const c=(DB.customers||[]).find(x=>String(x.id)===String(s.customerId));
-        return {id:s.id,operationId:s.operationId,date:s.date,customerId:s.customerId,customer:c?{id:c.id,name:c.name,phone:c.phone}:null,total:s.total,payments:s.payments,debtOutstanding:s.debtOutstanding,debtPayments:s.debtPayments,debtCorrections:s.debtCorrections||[],financialRevision:s.financialRevision||1,byId:s.byId,cashier:s.cashier,status:s.debtOutstanding===0?'closed':'open'};
+        return {id:s.id,operationId:s.operationId,date:s.date,customerId:s.customerId,customer:c?{id:c.id,name:c.name,phone:c.phone}:null,total:s.total,payments:s.payments,debtOutstanding:s.debtOutstanding,debtPayments:s.debtPayments,debtCorrections:s.debtCorrections||[],financialRevision:s.financialRevision||1,byId:s.byId,cashier:s.cashier,status:s.deleted?'cancelled':s.debtOutstanding===0?'closed':'open'};
       });
       return json(res,200,{ok:true,debts});
     }
