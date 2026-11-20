@@ -11,7 +11,7 @@ NODE=r'C:\Users\kurba\AppData\Local\Programs\Microsoft VS Code\Code.exe'
 CHROME=r'C:\Program Files\Google\Chrome\Application\chrome.exe'
 with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_errors=True) as tmp:
     root=Path(tmp); db=root/'db';db.mkdir();profile=root/'browser'
-    (db/'db.json').write_text(json.dumps({'products':[{'id':'p1','name':'Тестовый грунт','sku':'SOIL','barcode':'123456','price':10000,'cost':5000,'stock':10,'cat':'Тест','emoji':'🌱'}],'customers':[],'sales':[],'counter':1001,'bonusPct':5}),encoding='utf8')
+    (db/'db.json').write_text(json.dumps({'products':[{'id':'p1','name':'Тестовый грунт','sku':'SOIL','barcode':'123456','price':10000,'cost':5000,'stock':10,'cat':'Тест','emoji':'🌱'}],'customers':[],'sales':[],'counter':1001,'bonusPct':5,'cashRegister':{'openingBalance':10500,'openedAt':'2026-01-01T00:00:00Z'}}),encoding='utf8')
     with socket.socket() as reservation:
         reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
     env=os.environ.copy();env.update(ELECTRON_RUN_AS_NODE='1',DATA_DIR=str(db),HOST='127.0.0.1',PORT=str(port),ADMIN_PASSWORD='synthetic-only',GREENVILLE_EXPERIMENTAL_V3='1')
@@ -43,6 +43,15 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
             print(dev.evaluate("JSON.stringify({checkout:typeof window.__gvExperimentalCheckout,sync:typeof window.__gvExperimentalSync,outbox:typeof ReceiptOutbox,cloud:window.cloudInfo&&window.cloudInfo(),pending:window.cloudPending&&window.cloudPending(),badge:document.querySelector('#cloudChip')?.textContent})"))
             raise
         wait_for(lambda:dev.evaluate("DB.products.some(p=>p.id==='p1')"))
+        dev.evaluate("document.querySelector('#mobileCash').click()")
+        wait_for(lambda:dev.evaluate("[...document.querySelectorAll('button')].some(b=>b.textContent==='Новый расход')"))
+        assert dev.evaluate("document.body.innerText.includes('Остаток наличных: 10500 сум')")
+        dev.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='Новый расход').click()")
+        dev.evaluate("{const i=document.querySelector('input[placeholder=\"Сумма расхода (сум)\"]'),d=i.closest('section');i.value='500';d.querySelector('textarea').value='Тестовая упаковка';[...d.querySelectorAll('button')].find(b=>b.textContent==='Подтвердить').click()}")
+        wait_for(lambda:json.loads((db/'db.json').read_text(encoding='utf8')).get('expenses'))
+        wait_for(lambda:dev.evaluate("document.body.innerText.includes('Остаток наличных: 10000 сум') && document.body.innerText.includes('Тестовая упаковка')"))
+        dev.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='Закрыть').click()")
+        print('cash expense UI, history and balance: passed')
         dev.evaluate("{const s=document.querySelector('#posSearch');s.value='грунт';s.dispatchEvent(new Event('input',{bubbles:true}))}")
         wait_for(lambda:dev.evaluate("document.querySelectorAll('#matchList .m-row').length===1"))
         dev.evaluate("document.querySelector('#matchList .m-row').click()")
@@ -117,6 +126,7 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         assert dev.evaluate("document.querySelector('#repStats .stat.blue .stat-value').textContent==='0'")
         dev.evaluate("document.querySelector('#periodSwitch [data-period=custom]').click();document.querySelector('#reportFrom').value=reportDayKey(new Date());document.querySelector('#reportTo').value=reportDayKey(new Date());document.querySelector('#reportTo').dispatchEvent(new Event('change'))")
         assert dev.evaluate("document.querySelector('#repStats .stat.blue .stat-value').textContent==='4'")
+        assert dev.evaluate("document.querySelector('#payBreakdown').textContent.includes('Расходы наличных') && document.querySelector('#payBreakdown').textContent.includes('Тестовая упаковка')")
         print('mobile report: passed')
         headers={'Authorization':'Bearer '+bootstrap.json()['token']}
         staff=httpx.get(base+'/api/staff',headers=headers).json()['staff']
@@ -132,6 +142,12 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         dev2.evaluate("document.querySelector('#loginName').value='cashier2';document.querySelector('#loginPass').value='synthetic-only';document.querySelector('#loginForm').requestSubmit()")
         wait_for(lambda:dev2.evaluate("typeof CURRENT!=='undefined' && CURRENT && CURRENT.role==='cashier' && document.querySelector('#loginScreen').hidden && typeof window.__gvExperimentalSync==='function'"))
         assert dev2.evaluate("document.querySelector('#mobileReports').hidden && DB.sales.length===0")
+        dev2.evaluate("document.querySelector('#mobileCash').click()")
+        wait_for(lambda:dev2.evaluate("[...document.querySelectorAll('button')].some(b=>b.textContent==='Новый расход')"))
+        assert dev2.evaluate("![...document.querySelectorAll('button')].some(b=>b.textContent==='Отменить расход')")
+        dev2.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='Новый расход').click();const i=document.querySelector('input[placeholder=\"Сумма расхода (сум)\"]'),d=i.closest('section');i.value='200';d.querySelector('textarea').value='Тестовый расход продавца';[...d.querySelectorAll('button')].find(b=>b.textContent==='Подтвердить').click()")
+        wait_for(lambda:len(json.loads((db/'db.json').read_text(encoding='utf8')).get('expenses',[]))==2)
+        dev2.evaluate("[...document.querySelectorAll('button')].find(b=>b.textContent==='Закрыть').click()")
         dev2.evaluate("go('reports')")
         assert dev2.evaluate("!document.querySelector('#view-reports').classList.contains('active')")
         dev.evaluate("go('pos')")

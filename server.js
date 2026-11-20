@@ -413,6 +413,26 @@ const server = http.createServer(async (req, res)=>{
       }
     }
 
+    if(experimentalReceiptLedger && p === '/api/experimental/cash' && req.method === 'GET'){
+      if(!DB.cashRegister)return json(res,200,{ok:true,opened:false});
+      try{return json(res,200,{ok:true,opened:true,...require('./sync/cash_register').cashRegister(DB)});}
+      catch(e){return json(res,409,{ok:false,msg:'Наличная касса не настроена'});}
+    }
+    if(experimentalReceiptLedger && p === '/api/experimental/cash-open' && req.method === 'POST'){
+      const b=await readBody(req,1024*1024);
+      if(me.role!=='admin' || !b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Только администратор'});
+      try{const result=experimentalReceiptLedger.openCash(Object.assign({},DB,{operations:DB.operations||{}}),b.receipt,persistExperimentalDb,me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate});}
+      catch(e){return json(res,e.storageError?503:409,{ok:false,msg:'Не удалось открыть кассу. Обновите данные и проверьте, не открыта ли она.'});}
+    }
+    if(experimentalReceiptLedger && p === '/api/experimental/expenses' && req.method === 'GET'){
+      return json(res,200,{ok:true,expenses:DB.expenses||[]});
+    }
+    if(experimentalReceiptLedger && p === '/api/experimental/expense' && req.method === 'POST'){
+      const b=await readBody(req,1024*1024);
+      if(!b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Операция принадлежит другому сотруднику'});
+      try{const result=experimentalReceiptLedger.changeExpense(Object.assign({},DB,{operations:DB.operations||{}}),b.receipt,persistExperimentalDb,me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,expenseId:result.expenseId});}
+      catch(e){return json(res,e.message==='forbidden'?403:e.storageError?503:409,{ok:false,msg:e.message==='forbidden'?'Только администратор может изменить расход':'Расход не сохранён. Проверьте данные или обновите список.'});}
+    }
     if(experimentalReceiptLedger && p === '/api/experimental/debts' && req.method === 'GET'){
       const debts=(DB.sales||[]).filter(s=>s.payments && (s.payments.debt>0 || (s.debtPayments||[]).length || (s.debtCorrections||[]).some(c=>(c.before?.payments?.debt||0)>0))).map(s=>{
         const c=(DB.customers||[]).find(x=>String(x.id)===String(s.customerId));

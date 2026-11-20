@@ -50,6 +50,15 @@
     return out;
   }
   function refundTotals(sales,period){const result={cash:0,terminal:0,owner_card:0};for(const s of sales)for(const r of s.refunds||[])if(period(r.at))for(const k of Object.keys(result))result[k]+=r.amounts[k]||0;return result;}
-  root.greenvillePaymentReporting={summarize,revenueEvents,refundTotals,dayKey,inPeriod};
-  if(typeof module!=='undefined')module.exports={summarize,revenueEvents,refundTotals,dayKey,inPeriod};
+  function expenseEvents(expenses){
+    const events=[];
+    for(const e of expenses){
+      const history=e.history||[],first=history[0];
+      events.push({at:e.at,amount:first?first.before.amount:e.amount,purpose:first?first.before.purpose:e.purpose,byId:e.byId,by:e.by,kind:'create',expenseId:e.id});
+      for(const h of history){const before=h.before.cancelled?0:h.before.amount,after=h.after.cancelled?0:h.after.amount;events.push({at:h.at,amount:after-before,purpose:h.after.purpose,byId:h.byId,by:h.by,kind:h.action,expenseId:e.id});}
+    }
+    return events;
+  }
+  root.greenvillePaymentReporting={summarize,revenueEvents,refundTotals,expenseEvents,dayKey,inPeriod};
+  if(typeof module!=='undefined')module.exports={summarize,revenueEvents,refundTotals,expenseEvents,dayKey,inPeriod};
 })(typeof globalThis!=='undefined'?globalThis:this);

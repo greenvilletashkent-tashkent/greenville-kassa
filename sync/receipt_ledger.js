@@ -101,7 +101,7 @@ function acceptReceipt(state, receipt, persist, actor = {}) {
   if(number>=Number.MAX_SAFE_INTEGER)throw new Error('receipt numbers exhausted');
   const saleId=String(number);next.counter=number+1;
   const date = typeof receipt.date === 'string' && Number.isFinite(Date.parse(receipt.date)) ? receipt.date : new Date().toISOString();
-  const sale={id:saleId,operationId:receipt.operationId,revision:1,date,paidAt:parked?null:date,paid:!parked,
+  const sale={id:saleId,operationId:receipt.operationId,revision:1,date,paidAt:parked?null:date,cashReceivedAt:parked?null:new Date().toISOString(),paid:!parked,
     items:lines,subtotal:gross,total:receipt.total,discountTotal:receipt.discount,discountSum:receipt.discount,
     servicesSum:receipt.items.filter(i=>i.service===true).reduce((sum,i)=>sum+i.price*i.quantity,0),
     cost:unknownGoodsCost?null:cost,profit:(unknownGoodsCost||unknownServiceCost)?null:receipt.total-cost,
@@ -177,7 +177,7 @@ function changeReceipt(state, change, persist, actor={}) {
   }
   if(change.kind==='pay'){
     if(sale.deleted || sale.paid)throw new Error('sale not payable');
-    Object.assign(sale,payment({...change,customerId:sale.customerId},sale.total));sale.paid=true;sale.paidAt=new Date().toISOString();sale.date=sale.paidAt;awardBonus(next,sale);
+    Object.assign(sale,payment({...change,customerId:sale.customerId},sale.total));sale.paid=true;sale.paidAt=new Date().toISOString();sale.cashReceivedAt=sale.paidAt;sale.date=sale.paidAt;awardBonus(next,sale);
     sale.revision=(sale.revision||1)+1;sale.updatedAt=sale.paidAt;
     next.operations[change.operationId]={hash,saleId:String(sale.id),actorId:actor.id||null};
     if(persist(next)===false)throw new Error('persistence failed');
@@ -382,4 +382,43 @@ function correctDebt(state,change,persist,actor={}){
   return {state:next,duplicate:false,saleId:String(sale.id)};
 }
 
-module.exports = {acceptReceipt,changeReceipt,repayDebt,correctDebt,refundPayment,addStock,saveProduct,archiveProduct,importProducts,addCustomer,receiptHash};
+function openCash(state,change,persist,actor={}){
+  if(!actor.id||actor.role!=='admin')throw Error('forbidden');
+  if(!change||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(change.operationId||'')||!Number.isSafeInteger(change.openingBalance)||change.openingBalance<0)throw Error('invalid opening');
+  const hash=receiptHash(change),previous=(state.operations||{})[change.operationId];
+  if(previous){if(previous.hash!==hash||previous.actorId!==actor.id)throw Error('operation id conflict');return {state,duplicate:true};}
+  if(state.cashRegister)throw Error('cash register already opened');
+  const next=structuredClone(state);next.operations=next.operations||{};
+  const baselineSales=Object.create(null);
+  for(const s of next.sales||[])baselineSales[String(s.id)]={paid:s.paid!==false,repayments:(s.debtPayments||[]).length,corrections:(s.debtCorrections||[]).length,refunds:(s.refunds||[]).length};
+  next.cashRegister={openingBalance:change.openingBalance,openedAt:new Date().toISOString(),openedById:actor.id,openedBy:actor.name||'',operationId:change.operationId,timeZone:'Asia/Tashkent',baselineSales};
+  next.operations[change.operationId]={hash,actorId:actor.id,kind:'cash_open'};
+  if(persist(next)===false)throw Error('persistence failed');
+  return {state:next,duplicate:false};
+}
+function changeExpense(state,change,persist,actor={}){
+  if(!actor.id || !['admin','cashier'].includes(actor.role))throw Error('forbidden');
+  if(!state.cashRegister || !Number.isSafeInteger(state.cashRegister.openingBalance) || state.cashRegister.openingBalance<0 || !Number.isFinite(Date.parse(state.cashRegister.openedAt)))throw Error('cash register not initialized');
+  if(!change || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(change.operationId||''))throw Error('invalid operation id');
+  if(!['create','edit','cancel'].includes(change.action))throw Error('invalid expense action');
+  if(change.action!=='create' && actor.role!=='admin')throw Error('forbidden');
+  const hash=receiptHash(change),previous=(state.operations||{})[change.operationId];
+  if(previous){if(previous.hash!==hash||previous.actorId!==actor.id)throw Error('operation id conflict');return {state,duplicate:true,expenseId:previous.expenseId};}
+  if(change.action!=='cancel' && (!Number.isSafeInteger(change.amount)||change.amount<=0||typeof change.purpose!=='string'||!change.purpose.trim()||change.purpose.length>2000))throw Error('invalid expense');
+  const next=structuredClone(state);next.operations=next.operations||{};next.expenses=next.expenses||[];
+  const at=new Date().toISOString();let expense;
+  if(change.action==='create'){
+    expense={id:change.operationId,amount:change.amount,purpose:change.purpose,at,byId:actor.id,by:actor.name||'',revision:1,cancelled:false,history:[]};
+    next.expenses.push(expense);
+  }else{
+    expense=next.expenses.find(x=>x.id===change.expenseId);
+    if(!expense || expense.cancelled || !Number.isSafeInteger(change.expectedRevision) || expense.revision!==change.expectedRevision)throw Error('expense revision conflict');
+    const before={amount:expense.amount,purpose:expense.purpose,cancelled:expense.cancelled};
+    if(change.action==='edit'){expense.amount=change.amount;expense.purpose=change.purpose;}else expense.cancelled=true;
+    expense.revision++;expense.history.push({operationId:change.operationId,action:change.action,at,byId:actor.id,by:actor.name||'',before,after:{amount:expense.amount,purpose:expense.purpose,cancelled:expense.cancelled}});
+  }
+  next.operations[change.operationId]={hash,actorId:actor.id,expenseId:expense.id};
+  if(persist(next)===false)throw Error('persistence failed');
+  return {state:next,duplicate:false,expenseId:expense.id};
+}
+module.exports = {acceptReceipt,changeReceipt,repayDebt,correctDebt,refundPayment,openCash,changeExpense,addStock,saveProduct,archiveProduct,importProducts,addCustomer,receiptHash};
