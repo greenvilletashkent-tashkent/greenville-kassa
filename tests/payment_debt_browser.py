@@ -33,10 +33,13 @@ with tempfile.TemporaryDirectory(prefix='gv-debt-ui-',ignore_cleanup_errors=True
             dev.evaluate("document.querySelector('#loginName').value="+json.dumps(login)+";document.querySelector('#loginPass').value='synthetic-only';document.querySelector('#loginForm').requestSubmit()")
             wait_for(lambda:dev.evaluate("CURRENT && typeof window.__gvExperimentalSync==='function' && DB.products.some(p=>p.id==='p')"))
         a,b,c=clients[0][1],clients[1][1],clients[2][1]
+        a.evaluate("window.__gvExperimentalSync()")
+        wait_for(lambda:a.evaluate("getComputedStyle(document.querySelector('#payMethods')).display==='none' && !document.querySelector('#securePayHint').hidden"))
         for index,parts in enumerate(([300,0,0,0],[0,300,0,0],[0,0,300,0],[100,150,50,0],[100,100,0,100])):
             dev=a
             dev.evaluate("addToCart('p');document.querySelector('#btnCheckout').click()")
             assert dev.evaluate("!!document.querySelector('#gvPaymentDialog')")
+            assert dev.evaluate("['Наличные','Банковский терминал','Карта руководителя','Долг','Смешанная оплата'].every(t=>[...document.querySelectorAll('#gvPaymentDialog button')].some(b=>b.textContent===t))")
             dev.evaluate("{const x=[...document.querySelectorAll('#gvPaymentDialog input')];"+''.join(f"x[{i}].value='{v}';" for i,v in enumerate(parts))+"document.querySelector('#gvPaymentDialog select').value='c';[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу').click()}")
             try:wait_for(lambda:len(state()['sales'])==index+1)
             except AssertionError:

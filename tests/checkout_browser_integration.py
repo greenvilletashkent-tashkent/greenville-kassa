@@ -101,9 +101,12 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         wait_for(lambda:json.loads((db/'db.json').read_text(encoding='utf8'))['products'][0]['stock']==6)
         wait_for(lambda:dev.evaluate("DB.sales.some(s=>s.id==='1004' && s.revision===2 && s.total===20000)"))
         dev.evaluate("loadOrderIntoCart('1004')")
-        dev.evaluate("document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
+        selected=dev.evaluate("(()=>{document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Банковский терминал').click();const fields=[...document.querySelectorAll('#gvPaymentDialog input')].slice(0,4).map(x=>x.value);[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу').click();return fields})()")
+        assert selected[:2]==['0','20000'],selected
         wait_for(lambda:json.loads((db/'db.json').read_text(encoding='utf8'))['sales'][-1]['paid'])
         assert json.loads((db/'db.json').read_text(encoding='utf8'))['products'][0]['stock']==6
+        saved_pay=json.loads((db/'db.json').read_text(encoding='utf8'))['sales'][-1]['payments']
+        assert saved_pay['terminal']==20000, saved_pay
         wait_for(lambda:dev.evaluate("DB.sales.length===4 && DB.sales.some(s=>s.id==='1004' && s.paid)"))
         print('park, edit and pay do not double-deduct: passed')
         dev.evaluate("document.querySelector('#mobileReports').click()")
