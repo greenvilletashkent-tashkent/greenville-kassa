@@ -26,7 +26,11 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         bootstrap=httpx.post(base+'/api/login',json={'login':'admin','pass':'synthetic-only'})
         assert bootstrap.status_code==200
         browser=subprocess.Popen([CHROME,'--headless=new','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-extensions','--remote-debugging-port=0','--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',f'--user-data-dir={profile}',base+'/'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-        active=profile/'DevToolsActivePort';wait_for(active.exists);devport=int(active.read_text().splitlines()[0])
+        active=profile/'DevToolsActivePort'
+        def debug_port():
+            try:return int(active.read_text().splitlines()[0])
+            except (OSError,ValueError,IndexError):return None
+        wait_for(debug_port);devport=debug_port()
         pages=httpx.get(f'http://127.0.0.1:{devport}/json').json()
         dev=DevTools(next(p for p in pages if p['url'].startswith(base))['webSocketDebuggerUrl'])
         dev.call('Runtime.enable');dev.call('Emulation.setDeviceMetricsOverride',{'width':390,'height':844,'deviceScaleFactor':1,'mobile':True})
@@ -43,7 +47,7 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         wait_for(lambda:dev.evaluate("document.querySelectorAll('#matchList .m-row').length===1"))
         dev.evaluate("document.querySelector('#matchList .m-row').click()")
         assert dev.evaluate("cart.length===1 && cart[0].id==='p1'")
-        dev.evaluate("document.querySelector('#btnCheckout').click()")
+        dev.evaluate("document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
         wait_for(lambda:json.loads((db/'db.json').read_text(encoding='utf8')).get('sales'))
         saved=json.loads((db/'db.json').read_text(encoding='utf8'))
         assert len(saved['sales'])==1 and saved['products'][0]['stock']==9
@@ -53,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         dev.call('Network.emulateNetworkConditions',{'offline':True,'latency':0,'downloadThroughput':0,'uploadThroughput':0})
         dev.evaluate("{const s=document.querySelector('#posSearch');s.value='грунт';s.dispatchEvent(new Event('input',{bubbles:true}))}")
         wait_for(lambda:dev.evaluate("document.querySelectorAll('#matchList .m-row').length===1"))
-        dev.evaluate("document.querySelector('#matchList .m-row').click();document.querySelector('#btnCheckout').click()")
+        dev.evaluate("document.querySelector('#matchList .m-row').click();document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
         wait_for(lambda:dev.evaluate("(async()=>{let q=await new ReceiptOutbox().open();let n=(await q.list()).length;q.close();return n>0})()"))
         wait_for(lambda:dev.evaluate("!document.querySelector('#syncQueueStatus').hidden && document.querySelector('#syncQueueStatus').textContent.includes('1')"))
         assert len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==1
@@ -81,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         dev.evaluate("document.querySelector('#matchList [data-service]').click()")
         wait_for(lambda:dev.evaluate("!!document.querySelector('[data-sprice]')"))
         dev.evaluate("{const i=document.querySelector('[data-sprice]');i.value='15000';i.dispatchEvent(new Event('input',{bubbles:true}))}")
-        dev.evaluate("document.querySelector('#btnCheckout').click()")
+        dev.evaluate("document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
         wait_for(lambda:len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==3)
         assert json.loads((db/'db.json').read_text(encoding='utf8'))['products'][0]['stock']==8
         wait_for(lambda:dev.evaluate("DB.sales.length===3"))
@@ -97,7 +101,7 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
         wait_for(lambda:json.loads((db/'db.json').read_text(encoding='utf8'))['products'][0]['stock']==6)
         wait_for(lambda:dev.evaluate("DB.sales.some(s=>s.id==='1004' && s.revision===2 && s.total===20000)"))
         dev.evaluate("loadOrderIntoCart('1004')")
-        dev.evaluate("document.querySelector('#btnCheckout').click()")
+        dev.evaluate("document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
         wait_for(lambda:json.loads((db/'db.json').read_text(encoding='utf8'))['sales'][-1]['paid'])
         assert json.loads((db/'db.json').read_text(encoding='utf8'))['products'][0]['stock']==6
         wait_for(lambda:dev.evaluate("DB.sales.length===4 && DB.sales.some(s=>s.id==='1004' && s.paid)"))
@@ -132,8 +136,8 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
             client.evaluate("{const s=document.querySelector('#posSearch');s.value='грунт';s.dispatchEvent(new Event('input',{bubbles:true}))}")
             wait_for(lambda:client.evaluate("document.querySelectorAll('#matchList .m-row').length===1"))
             client.evaluate("document.querySelector('#matchList .m-row').click()")
-        dev.evaluate("document.querySelector('#btnCheckout').click()")
-        dev2.evaluate("document.querySelector('#btnCheckout').click()")
+        dev.evaluate("document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
+        dev2.evaluate("document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
         wait_for(lambda:len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==6)
         saved=json.loads((db/'db.json').read_text(encoding='utf8'));assert saved['products'][0]['stock']==4
         assert {s['byId'] for s in saved['sales']}=={'u1','cashier-2'}
@@ -212,7 +216,7 @@ with tempfile.TemporaryDirectory(prefix='gv-synthetic-e2e-',ignore_cleanup_error
             wait_for(lambda:dev.evaluate("CURRENT && document.querySelector('#loginScreen').hidden"))
         assert dev.evaluate("window.__gvCloudVerificationPending!==true"),'payment remains blocked after re-login following transition'
         stock_before=json.loads((db/'db.json').read_text(encoding='utf8'))['products'][0]['stock']
-        dev.evaluate("addToCart('p1');document.querySelector('#btnCheckout').click();document.querySelector('#btnCheckout').click()")
+        dev.evaluate("addToCart('p1');document.querySelector('#btnCheckout').click();document.querySelector('#btnCheckout').click();[...document.querySelectorAll('#gvPaymentDialog button')].find(b=>b.textContent==='Подтвердить продажу')?.click()")
         wait_for(lambda:len(json.loads((db/'db.json').read_text(encoding='utf8'))['sales'])==9)
         time.sleep(1)
         after=json.loads((db/'db.json').read_text(encoding='utf8'));assert len(after['sales'])==9 and after['products'][0]['stock']==stock_before-1

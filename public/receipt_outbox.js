@@ -42,9 +42,9 @@
         const r=store.get(operationId);r.onsuccess=()=>{const e=r.result;if(!e || e.body!==body){tx.abort();return}e.status='uncertain';store.put(e);done(e);};
       });
     }
-    setConflict(operationId,body){
+    setConflict(operationId,body,reason){
       return this.transaction('readwrite',(store,done,tx)=>{
-        const r=store.get(operationId);r.onsuccess=()=>{const e=r.result;if(!e || e.body!==body){tx.abort();return}e.status='conflict';store.put(e);done(e);};
+        const r=store.get(operationId);r.onsuccess=()=>{const e=r.result;if(!e || e.body!==body){tx.abort();return}e.status='conflict';if(reason)e.conflictReason=reason;store.put(e);done(e);};
       });
     }
     acknowledge(operationId,body){
@@ -52,10 +52,19 @@
         const r=store.get(operationId);r.onsuccess=()=>{const e=r.result;if(!e || e.body!==body){tx.abort();return}store.delete(operationId);done(true);};
       });
     }
+    resolveConflict(operationId,body,replacement){
+      return this.transaction('readwrite',(store,done,tx)=>{
+        const r=store.get(operationId);r.onsuccess=()=>{const e=r.result;
+          if(!e||e.body!==body||e.status!=='conflict'){tx.abort();return;}
+          if(replacement){if(!replacement.operationId || replacement.operationId===operationId){tx.abort();return;}store.add({operationId:replacement.operationId,body:JSON.stringify(replacement),status:'pending'});}
+          e.status=replacement?'resolved_retry':'resolved_cancelled';e.resolvedAt=new Date().toISOString();e.replacementId=replacement?replacement.operationId:null;store.put(e);done(true);
+        };
+      });
+    }
     async flush(transport){
       const entries=await this.list();
       for(const entry of entries){
-        if(entry.status==='legacy_review' || entry.status==='conflict') continue;
+        if(entry.status==='legacy_review' || entry.status==='conflict' || entry.status.startsWith('resolved_')) continue;
         try{
           if(entry.status==='uncertain'){
             const state=await transport.status(entry.body);
@@ -66,7 +75,7 @@
           await this.setUncertain(entry.operationId,entry.body);
           const result=await transport.send(entry.body);
           if(result==='accepted')await this.acknowledge(entry.operationId,entry.body);
-          else if(result==='conflict')await this.setConflict(entry.operationId,entry.body);
+          else if(result==='conflict' || result?.status==='conflict')await this.setConflict(entry.operationId,entry.body,result?.reason);
         }catch(error){
           // A network or storage error leaves the immutable entry for review/retry.
         }

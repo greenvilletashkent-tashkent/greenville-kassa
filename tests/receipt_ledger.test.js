@@ -37,8 +37,9 @@ test('unknown goods and invalid quantities rejected; occupied receipt number ski
   s.sales.push({id:'1001'});const result=acceptReceipt(s,receipt(),()=>{});assert.equal(result.saleId,'1002');assert.equal(result.state.sales.length,3);
 });
 test('void and restore are idempotent, revision checked and adjust stock once',()=>{
- const actor={id:'cashier',name:'Test',role:'cashier'};let s=acceptReceipt(initial(),receipt(),()=>{},actor).state;
+ const actor={id:'cashier',name:'Test',role:'admin'};let s=acceptReceipt(initial(),receipt(),()=>{},actor).state;
  const change={operationId:crypto.randomUUID(),kind:'void',saleId:'1001',revision:1};
+ assert.throws(()=>changeReceipt(s,change,()=>{},{...actor,role:'cashier'}),/forbidden/);
  s=changeReceipt(s,change,()=>{},actor).state;assert.equal(s.products[0].stock,10);
  assert.equal(changeReceipt(s,change,()=>{},actor).duplicate,true);assert.equal(s.products[0].stock,10);
  assert.throws(()=>changeReceipt(s,{...change,operationId:crypto.randomUUID(),kind:'restore'},()=>{},actor),/revision/);
@@ -53,7 +54,7 @@ test('parked sale reserves once; payment and retry do not change stock',()=>{
  assert.equal(changeReceipt(s,pay,()=>{},actor).duplicate,true);assert.equal(s.products[0].stock,8);
 });
 test('edit adjusts stock once and rejects unreconciled paid amount',()=>{
- const actor={id:'cashier',name:'Test',role:'cashier'};let s=acceptReceipt(initial(),receipt(),()=>{},actor).state;
+ const actor={id:'cashier',name:'Test',role:'admin'};let s=acceptReceipt(initial(),receipt(),()=>{},actor).state;
  const edit={operationId:crypto.randomUUID(),kind:'edit',saleId:'1001',revision:1,items:[{productId:'p',quantity:1,price:100}],discount:10,total:90};
  s=changeReceipt(s,edit,()=>{},actor).state;assert.equal(s.products[0].stock,9);assert.equal(s.sales[1].revision,2);
  assert.equal(changeReceipt(s,edit,()=>{},actor).duplicate,true);assert.equal(s.products[0].stock,9);
@@ -69,9 +70,9 @@ test('customer bonuses accrue once for a paid sale and once for deferred payment
  const pay={operationId:crypto.randomUUID(),kind:'pay',saleId:'1002',revision:1,pay:'cash'};
  state=changeReceipt(state,pay,()=>{},actor).state;assert.equal(state.customers[0].bonus,18);assert.equal(state.customers[0].visits,2);
  state=changeReceipt(state,pay,()=>{},actor).state;assert.equal(state.customers[0].bonus,18);
- state=changeReceipt(state,{operationId:crypto.randomUUID(),kind:'void',saleId:'1001',revision:1},()=>{},actor).state;
+ state=changeReceipt(state,{operationId:crypto.randomUUID(),kind:'void',saleId:'1001',revision:1},()=>{},{...actor,role:'admin'}).state;
  assert.equal(state.customers[0].bonus,9);assert.equal(state.customers[0].visits,1);
- state=changeReceipt(state,{operationId:crypto.randomUUID(),kind:'restore',saleId:'1001',revision:2},()=>{},actor).state;
+ state=changeReceipt(state,{operationId:crypto.randomUUID(),kind:'restore',saleId:'1001',revision:2},()=>{},{...actor,role:'admin'}).state;
  assert.equal(state.customers[0].bonus,18);assert.equal(state.customers[0].visits,2);
 });
 test('archiving preserves existing history and rejects new sales',()=>{

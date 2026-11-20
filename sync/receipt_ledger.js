@@ -16,6 +16,14 @@ function receiptHash(receipt) {
 }
 
 function payment(receipt,total){
+  if(receipt.payments!==undefined){
+    const p=receipt.payments;
+    if(!p || typeof p!=='object' || Array.isArray(p) || Object.keys(p).some(k=>!['cash','terminal','owner_card','debt'].includes(k)))throw Error('invalid payment breakdown');
+    const amounts={cash:p.cash??0,terminal:p.terminal??0,owner_card:p.owner_card??0,debt:p.debt??0};
+    if(Object.values(amounts).some(v=>!Number.isSafeInteger(v)||v<0) || !Number.isSafeInteger(Object.values(amounts).reduce((a,b)=>a+b,0)) || Object.values(amounts).reduce((a,b)=>a+b,0)!==total)throw Error('invalid payment amount');
+    if(amounts.debt && !receipt.customerId)throw Error('customer required for debt');
+    return {pay:'breakdown',cashSum:amounts.cash,cardSum:amounts.terminal,payments:amounts,debtOutstanding:amounts.debt,debtPayments:[],financialRevision:1};
+  }
   const pay=receipt.pay || 'cash';
   if(!['cash','card','mixed'].includes(pay))throw new Error('invalid payment method');
   const cashSum=pay==='cash'?total:pay==='card'?0:receipt.cashSum;
@@ -56,6 +64,11 @@ function acceptReceipt(state, receipt, persist, actor = {}) {
   }
   if (!Number.isSafeInteger(receipt.total) || receipt.total < 0) throw new Error('invalid total');
   const next = structuredClone(state);
+  if(receipt.newCustomer!==undefined){
+    const c=receipt.newCustomer;
+    if(!c || typeof c.id!=='string' || c.id!==receipt.customerId || !/^[0-9a-f-]{36}$/i.test(c.id) || typeof c.name!=='string' || !c.name.trim() || c.name.length>120 || typeof c.phone!=='string' || c.phone.length>40 || (next.customers||[]).some(x=>String(x.id)===c.id))throw Error('invalid new customer');
+    next.customers.push({id:c.id,name:c.name.trim(),phone:c.phone.trim()||'—',visits:0,spent:0,bonus:0,last:null});
+  }
   const seen = new Set();
   const lines = [];
   let cost = 0, unknownGoodsCost = false, unknownServiceCost = false;
@@ -112,6 +125,8 @@ function changeReceipt(state, change, persist, actor={}) {
   }
   const next=structuredClone(state), sale=next.sales.find(s=>String(s.id)===String(change.saleId));
   if(!sale || !sale.operationId)throw new Error('sale not found or legacy sale');
+  if(sale.payments && sale.payments.debt>0 && change.kind!=='note')throw new Error('payment breakdown requires reconciliation');
+  if(actor.role!=='admin' && (['void','restore'].includes(change.kind) || (change.kind==='edit' && sale.paid)))throw new Error('forbidden');
   if(actor.role!=='admin' && String(sale.byId)!==String(actor.id))throw new Error('forbidden');
   if((sale.revision||1)!==change.revision)throw new Error('sale revision conflict');
   if(change.kind==='note'){
@@ -146,13 +161,14 @@ function changeReceipt(state, change, persist, actor={}) {
     Object.assign(sale,{items:lines,subtotal:gross,discountTotal:change.discount,discountSum:change.discount,total:change.total,
       servicesSum:serviceRevenue,cost:unknownGoods?null:cost,profit:unknownGoods||unknownService?null:change.total-cost,
       revision:(sale.revision||1)+1,updatedAt:new Date().toISOString()});
+    if(sale.payments)sale.financialRevision=(sale.financialRevision||1)+1;
     next.operations[change.operationId]={hash,saleId:String(sale.id),actorId:actor.id||null};
     if(persist(next)===false)throw new Error('persistence failed');
     return {state:next,duplicate:false,saleId:String(sale.id)};
   }
   if(change.kind==='pay'){
     if(sale.deleted || sale.paid)throw new Error('sale not payable');
-    Object.assign(sale,payment(change,sale.total));sale.paid=true;sale.paidAt=new Date().toISOString();sale.date=sale.paidAt;awardBonus(next,sale);
+    Object.assign(sale,payment({...change,customerId:sale.customerId},sale.total));sale.paid=true;sale.paidAt=new Date().toISOString();sale.date=sale.paidAt;awardBonus(next,sale);
     sale.revision=(sale.revision||1)+1;sale.updatedAt=sale.paidAt;
     next.operations[change.operationId]={hash,saleId:String(sale.id),actorId:actor.id||null};
     if(persist(next)===false)throw new Error('persistence failed');
@@ -170,8 +186,14 @@ function changeReceipt(state, change, persist, actor={}) {
     if(!Number.isSafeInteger(stock))throw new Error('invalid stock');
     p.stock=stock;
   }
+  const eventAt=new Date().toISOString();
+  if(sale.paid){
+    const snapshot=structuredClone({total:sale.total,cost:sale.cost,profit:sale.profit,items:sale.items,subtotal:sale.subtotal,discountTotal:sale.discountTotal,discountPct:sale.discountPct,cashier:sale.cashier});
+    sale.financialEvents=[...(sale.financialEvents||[]),{kind:deleting?'void':'restore',at:eventAt,operationId:change.operationId,byId:actor.id,snapshot}];
+  }
   sale.deleted=deleting;sale.revision=(sale.revision||1)+1;
-  sale.updatedAt=new Date().toISOString();
+  if(sale.payments)sale.financialRevision=(sale.financialRevision||1)+1;
+  sale.updatedAt=eventAt;
   if(deleting){sale.deletedAt=sale.updatedAt;sale.deletedBy=actor.name||'';}else{delete sale.deletedAt;delete sale.deletedBy;}
   next.operations[change.operationId]={hash,saleId:String(sale.id),actorId:actor.id||null};
   if(persist(next)===false)throw new Error('persistence failed');
@@ -279,4 +301,75 @@ function importProducts(state,change,persist,actor={}){
   return {state:next,duplicate:false};
 }
 
-module.exports = {acceptReceipt,changeReceipt,addStock,saveProduct,archiveProduct,importProducts,addCustomer,receiptHash};
+function repayDebt(state,change,persist,actor={}){
+  if(!change || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(change.operationId||''))throw Error('invalid operation id');
+  if(!actor.id || !['admin','cashier'].includes(actor.role))throw Error('forbidden');
+  const hash=receiptHash(change),previous=state.operations[change.operationId];
+  if(previous){if(previous.hash!==hash || previous.actorId!==actor.id)throw Error('operation id conflict');return {state,duplicate:true,saleId:previous.saleId};}
+  if(!['cash','terminal','owner_card'].includes(change.method) || !Number.isSafeInteger(change.amount) || change.amount<=0)throw Error('invalid payment');
+  const next=structuredClone(state),sale=next.sales.find(s=>String(s.id)===String(change.saleId));
+  if(!sale || sale.deleted || !sale.payments || !Number.isSafeInteger(sale.debtOutstanding) || sale.debtOutstanding<=0 || change.amount>sale.debtOutstanding)throw Error('invalid debt balance');
+  sale.debtOutstanding-=change.amount;
+  sale.debtPayments.push({operationId:change.operationId,amount:change.amount,method:change.method,byId:actor.id,at:new Date().toISOString()});
+  sale.financialRevision=(sale.financialRevision||1)+1;
+  next.operations[change.operationId]={hash,actorId:actor.id,saleId:String(sale.id)};
+  if(persist(next)===false)throw Error('persistence failed');
+  return {state:next,duplicate:false,saleId:String(sale.id)};
+}
+
+function refundable(sale,method){
+  const reversed=new Set((sale.debtCorrections||[]).filter(c=>c.action==='reverse_repayment').map(c=>c.paymentId));
+  const received=(sale.payments?.[method]||0)+(sale.debtPayments||[]).filter(p=>p.method===method&&!reversed.has(p.operationId)).reduce((a,p)=>a+p.amount,0);
+  return received-(sale.refunds||[]).reduce((a,r)=>a+(r.amounts[method]||0),0);
+}
+function refundPayment(state,change,persist,actor={}){
+  if(actor.role!=='admin'||!actor.id)throw Error('forbidden');
+  if(!change||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(change.operationId||''))throw Error('invalid operation id');
+  if(typeof change.reason!=='string'||change.reason.trim().length<3||change.reason.length>500)throw Error('invalid refund reason');
+  const hash=receiptHash(change),previous=state.operations[change.operationId];
+  if(previous){if(previous.hash!==hash||previous.actorId!==actor.id)throw Error('operation id conflict');return {state,duplicate:true,saleId:previous.saleId};}
+  if(!change.amounts||typeof change.amounts!=='object'||Array.isArray(change.amounts)||Object.keys(change.amounts).some(k=>!['cash','terminal','owner_card'].includes(k)))throw Error('invalid refund');
+  const amounts=Object.fromEntries(['cash','terminal','owner_card'].map(k=>[k,change.amounts[k]??0]));
+  if(Object.values(amounts).some(n=>!Number.isSafeInteger(n)||n<0)||!Number.isSafeInteger(Object.values(amounts).reduce((a,b)=>a+b,0))||!Object.values(amounts).some(n=>n>0))throw Error('invalid refund');
+  const next=structuredClone(state),sale=next.sales.find(s=>String(s.id)===String(change.saleId));
+  if(!sale||!sale.payments)throw Error('sale payment history unavailable');
+  if(!Number.isSafeInteger(change.expectedRevision)||change.expectedRevision!==(sale.financialRevision||1))throw Error('Операция изменилась. Обновите информацию перед возвратом.');
+  for(const [method,amount] of Object.entries(amounts))if(amount>refundable(sale,method))throw Error('refund exceeds received amount');
+  sale.refunds=[...(sale.refunds||[]),{operationId:change.operationId,at:new Date().toISOString(),byId:actor.id,by:actor.name||'',reason:change.reason.trim(),amounts}];
+  sale.financialRevision=(sale.financialRevision||1)+1;
+  next.operations[change.operationId]={hash,actorId:actor.id,saleId:String(sale.id)};
+  if(persist(next)===false)throw Error('persistence failed');
+  return {state:next,duplicate:false,saleId:String(sale.id)};
+}
+
+function correctDebt(state,change,persist,actor={}){
+  if(actor.role!=='admin' || !actor.id)throw Error('forbidden');
+  if(!change || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(change.operationId||'') || typeof change.reason!=='string' || change.reason.trim().length<3 || change.reason.length>500)throw Error('invalid correction');
+  if(!['reverse_repayment','correct_initial'].includes(change.action))throw Error('invalid correction');
+  const hash=receiptHash(change),previous=state.operations[change.operationId];
+  if(previous){if(previous.hash!==hash || previous.actorId!==actor.id)throw Error('operation id conflict');return {state,duplicate:true,saleId:previous.saleId};}
+  const next=structuredClone(state),sale=next.sales.find(s=>String(s.id)===String(change.saleId));
+  if(!sale || sale.deleted || !sale.payments || !Array.isArray(sale.debtPayments) || !Number.isSafeInteger(sale.debtOutstanding))throw Error('invalid debt');
+  if(!Number.isSafeInteger(change.expectedRevision) || change.expectedRevision!==(sale.financialRevision||1))throw Error('Операция изменилась. Обновите информацию перед исправлением.');
+  const corrections=sale.debtCorrections||[],before={payments:structuredClone(sale.payments),debtOutstanding:sale.debtOutstanding};
+  if(change.action==='reverse_repayment'){
+    const p=sale.debtPayments.find(p=>p.operationId===change.paymentId);
+    if(!p || corrections.some(c=>c.action==='reverse_repayment' && c.paymentId===change.paymentId))throw Error('payment already reversed or not found');
+    if(!Number.isSafeInteger(sale.debtOutstanding+p.amount) || sale.debtOutstanding+p.amount>sale.payments.debt)throw Error('invalid debt balance');
+    sale.debtOutstanding+=p.amount;
+  }else{
+    const updated=payment({payments:change.payments,customerId:sale.customerId},sale.total);
+    const repaid=sale.payments.debt-sale.debtOutstanding;
+    if(updated.payments.debt<repaid)throw Error('initial debt below repayments');
+    sale.payments=updated.payments;sale.cashSum=updated.cashSum;sale.cardSum=updated.cardSum;sale.debtOutstanding=updated.payments.debt-repaid;
+  }
+  const candidate={...sale,debtCorrections:[...corrections,{action:change.action,paymentId:change.paymentId||null}]};
+  if(['cash','terminal','owner_card'].some(method=>refundable(candidate,method)<0))throw Error('correction conflicts with refunds');
+  sale.debtCorrections=[...corrections,{operationId:change.operationId,action:change.action,paymentId:change.paymentId||null,reason:change.reason.trim(),byId:actor.id,at:new Date().toISOString(),before,after:{payments:structuredClone(sale.payments),debtOutstanding:sale.debtOutstanding}}];
+  sale.financialRevision=(sale.financialRevision||1)+1;
+  next.operations[change.operationId]={hash,actorId:actor.id,saleId:String(sale.id)};
+  if(persist(next)===false)throw Error('persistence failed');
+  return {state:next,duplicate:false,saleId:String(sale.id)};
+}
+
+module.exports = {acceptReceipt,changeReceipt,repayDebt,correctDebt,refundPayment,addStock,saveProduct,archiveProduct,importProducts,addCustomer,receiptHash};
