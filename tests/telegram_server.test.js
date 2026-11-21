@@ -39,7 +39,7 @@ test('Telegram remains disabled by default even when configuration values exist'
  try{let ready=false;for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok){ready=true;break}}catch{}await new Promise(r=>setTimeout(r,50))}assert.ok(ready);await new Promise(r=>setTimeout(r,100));const db=JSON.parse(fs.readFileSync(path.join(dir,'db.json')));assert.equal(db.telegramOutbox,undefined);assert.equal(fs.existsSync(capture),false);}
  finally{proc.kill();await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})}
 });
-test('test-only mode enqueues only one explicitly confirmed test message',async()=>{
+test('obsolete queue-based test mode cannot send a test message',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gv-telegram-testmode-')),capture=path.join(dir,'transport.jsonl');fs.writeFileSync(path.join(dir,'db.json'),JSON.stringify({products:[{id:'p',name:'Тест',stock:5,cost:5}],sales:[],customers:[],operations:{},counter:1001,bonusPct:0}));
  const sock=net.createServer();await new Promise(r=>sock.listen(0,'127.0.0.1',r));const port=sock.address().port;await new Promise(r=>sock.close(r));
  const env={...process.env,ELECTRON_RUN_AS_NODE:'1',DATA_DIR:dir,HOST:'127.0.0.1',PORT:String(port),ADMIN_PASSWORD:'synthetic-only',TELEGRAM_BOT_TOKEN:'not-a-real-token',TELEGRAM_CHAT_ID:'synthetic',TELEGRAM_ENABLED:'1',TELEGRAM_TEST_ONLY:'1',TELEGRAM_TEST_CAPTURE:capture};
@@ -50,10 +50,7 @@ test('test-only mode enqueues only one explicitly confirmed test message',async(
   const auth=(await post('/api/login',{login:'admin',pass:'synthetic-only'})).data;
   const sale={operationId:crypto.randomUUID(),cashierId:auth.id,items:[{productId:'p',quantity:1,price:10}],discount:0,total:10,payments:{cash:10}};assert.equal((await post('/api/experimental/receipt',{receipt:sale},auth.token)).status,200);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'db.json'))).telegramOutbox,undefined);
-  const operationId=crypto.randomUUID(),body={confirm:true,operationId};assert.equal((await post('/api/experimental/telegram-test',body,auth.token)).status,200);assert.equal((await post('/api/experimental/telegram-test',body,auth.token)).data.duplicate,true);
-  assert.equal((await post('/api/experimental/telegram-test',{confirm:true,operationId:crypto.randomUUID()},auth.token)).status,409);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'db.json'))).telegramOutbox.length,1);
-  let delivered=false;for(let i=0;i<180;i++){const d=JSON.parse(fs.readFileSync(path.join(dir,'db.json')));if(d.telegramOutbox[0].status==='sent'){delivered=true;break;}await new Promise(r=>setTimeout(r,100));}assert.ok(delivered);
-  const sent=fs.readFileSync(capture,'utf8').trim().split('\n').map(JSON.parse);assert.equal(sent.length,1);assert.match(sent[0].text,/тестовое уведомление/);
+  const operationId=crypto.randomUUID(),body={confirm:true,operationId};assert.equal((await post('/api/experimental/telegram-test',body,auth.token)).status,409);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'db.json'))).telegramOutbox,undefined);assert.equal(fs.existsSync(capture),false);
  }finally{proc.kill();await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})}
 });

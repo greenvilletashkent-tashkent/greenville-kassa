@@ -16,6 +16,8 @@ const fs   = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const telegramNotifications = require('./sync/telegram_notifications');
+const telegramTestAttempts = new Map();
+let telegramTestCompleted = false;
 // The protected protocol is the default. The opt-out is for isolated regression tests.
 const experimentalReceiptLedger = process.env.GREENVILLE_EXPERIMENTAL_V3 === '0'
   ? null : require('./sync/receipt_ledger');
@@ -451,7 +453,7 @@ const server = http.createServer(async (req, res)=>{
     }
     if(experimentalReceiptLedger && p === '/api/experimental/telegram-review' && req.method === 'GET'){
       if(me.role!=='admin')return json(res,403,{ok:false,msg:'Только администратор'});
-      return json(res,200,{ok:true,testMode:process.env.TELEGRAM_ENABLED==='1' && process.env.TELEGRAM_TEST_ONLY==='1' && !!process.env.TELEGRAM_BOT_TOKEN && !!process.env.TELEGRAM_CHAT_ID,notifications:(DB.telegramOutbox||[]).filter(e=>e.status==='uncertain').map(e=>({id:e.id,type:e.type||e.id.split(':')[0],createdAt:e.createdAt||null,text:e.text}))});
+      return json(res,200,{ok:true,testMode:!telegramTestCompleted && process.env.TELEGRAM_ENABLED!=='1' && process.env.TELEGRAM_TEST_DIRECT==='1' && !!process.env.TELEGRAM_BOT_TOKEN && !!process.env.TELEGRAM_CHAT_ID,notifications:(DB.telegramOutbox||[]).filter(e=>e.status==='uncertain').map(e=>({id:e.id,type:e.type||e.id.split(':')[0],createdAt:e.createdAt||null,text:e.text}))});
     }
     if(experimentalReceiptLedger && p === '/api/experimental/telegram-review' && req.method === 'POST'){
       if(me.role!=='admin')return json(res,403,{ok:false,msg:'Только администратор'});
@@ -461,11 +463,17 @@ const server = http.createServer(async (req, res)=>{
     }
     if(experimentalReceiptLedger && p === '/api/experimental/telegram-test' && req.method === 'POST'){
       if(me.role!=='admin')return json(res,403,{ok:false,msg:'Только администратор'});
-      if(process.env.TELEGRAM_ENABLED!=='1'||process.env.TELEGRAM_TEST_ONLY!=='1'||!process.env.TELEGRAM_BOT_TOKEN||!process.env.TELEGRAM_CHAT_ID)return json(res,409,{ok:false,msg:'Тестовый режим Telegram не включён'});
+      if(process.env.TELEGRAM_ENABLED==='1'||process.env.TELEGRAM_TEST_DIRECT!=='1'||!process.env.TELEGRAM_BOT_TOKEN||!process.env.TELEGRAM_CHAT_ID)return json(res,409,{ok:false,msg:'Прямой тест Telegram не включён или уведомления активны'});
       const body=await readBody(req,1024*1024);
-      if(!body.confirm || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.operationId||''))return json(res,400,{ok:false,msg:'Требуется подтверждение'});
-      try{const next=structuredClone(DB);const existing=(next.telegramOutbox||[]).find(e=>e.type==='test');if(existing && existing.eventId!=='test:'+body.operationId)return json(res,409,{ok:false,msg:'Тестовое сообщение уже было поставлено в очередь'});const added=telegramNotifications.enqueue(next,{id:'test:'+body.operationId,text:'GREENVILLE Kassa: тестовое уведомление по запросу администратора.'});if(added){persistExperimentalDb(next);DB=next;}return json(res,200,{ok:true,duplicate:!added});}
-      catch(e){return json(res,e.storageError?503:409,{ok:false,msg:'Не удалось сохранить тестовое уведомление'});}
+      if(body.confirm!==true || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.operationId||''))return json(res,400,{ok:false,msg:'Требуется подтверждение'});
+      const key=String(me.id)+':'+body.operationId;
+      if(!telegramTestAttempts.has(key)){
+        if(telegramTestCompleted)return json(res,409,{ok:false,msg:'Тест уже выполнен; отключите временный режим'});
+        if(telegramTestAttempts.size>=1000)return json(res,429,{ok:false,msg:'Лимит тестов до перезапуска сервера'});
+        telegramTestCompleted=true;
+        telegramTestAttempts.set(key,require('./sync/telegram_single_test').sendSingle({token:process.env.TELEGRAM_BOT_TOKEN,chatId:process.env.TELEGRAM_CHAT_ID}));
+      }
+      const result=await telegramTestAttempts.get(key);return json(res,200,{ok:true,...result});
     }
     if(experimentalReceiptLedger && p === '/api/experimental/debts' && req.method === 'GET'){
       const debts=(DB.sales||[]).filter(s=>s.payments && (s.payments.debt>0 || (s.debtPayments||[]).length || (s.debtCorrections||[]).some(c=>(c.before?.payments?.debt||0)>0))).map(s=>{
