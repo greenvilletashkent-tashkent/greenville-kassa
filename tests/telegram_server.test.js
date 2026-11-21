@@ -18,7 +18,8 @@ test('isolated server commits one notification with sale, expense and debt repay
   assert.equal(queue.filter(x=>x.eventId==='sale:'+sale.operationId).length,1);assert.equal(queue.filter(x=>x.eventId==='debt_payment:'+debt.operationId).length,1);assert.equal(queue.filter(x=>x.eventId==='expense:'+expense.operationId).length,1);assert.equal(data.products[0].stock,9);
   assert.ok(queue.find(x=>x.eventId==='sale:'+sale.operationId).text.includes('Новый долг: 50 сум'));
   proc.kill();await new Promise(r=>proc.once('exit',r));proc=start();
-  let sent=false;for(let i=0;i<350;i++){const latest=JSON.parse(fs.readFileSync(path.join(dir,'db.json')));if(latest.telegramOutbox.find(x=>x.eventId==='sale:'+sale.operationId)?.status==='sent'){sent=true;break}await new Promise(r=>setTimeout(r,100));}assert.ok(sent,'sale notification not delivered after restart');
+  let sent=false;for(let i=0;i<350;i++){if(fs.existsSync(capture)&&fs.statSync(capture).size){sent=true;break}await new Promise(r=>setTimeout(r,100));}assert.ok(sent,'sale notification not delivered after restart');
+  await new Promise(r=>setTimeout(r,150));const latest=JSON.parse(fs.readFileSync(path.join(dir,'db.json')));assert.equal(latest.telegramOutbox.find(x=>x.eventId==='sale:'+sale.operationId)?.status,'sent');
   const messages=fs.readFileSync(capture,'utf8').trim().split('\n').map(JSON.parse);assert.equal(messages.filter(x=>x.text.includes('Продажа №'+first.data.saleId)).length,1);
  }finally{proc.kill();await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})}
 });

@@ -59,6 +59,28 @@
     }
     return events;
   }
-  root.greenvillePaymentReporting={summarize,revenueEvents,refundTotals,expenseEvents,dayKey,inPeriod};
-  if(typeof module!=='undefined')module.exports={summarize,revenueEvents,refundTotals,expenseEvents,dayKey,inPeriod};
+  function knownCost(cost){return Number.isSafeInteger(cost) && cost>=0;}
+  function missingCostProducts(events,products){
+    const catalog=new Map((products||[]).map(p=>[String(p.id),p])),rows=new Map();
+    for(const event of events||[]){
+      const items=event.items||[],sign=event.eventSign===-1?-1:1;
+      const gross=items.map(i=>Number.isSafeInteger(i.qty)&&Number.isSafeInteger(i.price)&&i.price>=0&&i.qty*sign>=0&&Number.isSafeInteger(i.qty*i.price)?Math.abs(i.qty*i.price):null);
+      const sum=gross.every(v=>v!==null)?gross.reduce((a,b)=>a+b,0):NaN,total=event.total*sign;
+      let allocated=null;
+      if(Number.isSafeInteger(sum)&&Number.isSafeInteger(total)&&total>=0&&total<=sum && (sum>0||total===0)){
+        if(sum===0)allocated=gross.map(()=>0);
+        else {const den=BigInt(sum),t=BigInt(total),parts=gross.map((g,index)=>{const n=BigInt(g)*t;return {index,value:Number(n/den),remainder:n%den};});let left=total-parts.reduce((n,p)=>n+p.value,0);for(const p of [...parts].sort((a,b)=>a.remainder===b.remainder?a.index-b.index:a.remainder>b.remainder?-1:1)){if(left--<=0)break;p.value++;}allocated=parts.map(p=>p.value*sign);}
+      }
+      for(const [index,item] of items.entries()){
+      if(item.isService || knownCost(item.cost))continue;
+      const id=item.id==null?'':String(item.id),key=id||'unknown:'+String(item.name||'');
+      const product=catalog.get(id),row=rows.get(key)||{id,name:String(item.name||product?.name||'Товар'),sku:String(product?.sku||''),quantity:0,revenue:0,editable:!!product&&!product.deleted};
+      const qty=Number(item.qty),price=Number(item.price);if(!Number.isFinite(qty)||!Number.isFinite(price))continue;
+      row.quantity+=qty;if(allocated===null)row.revenue=null;else if(row.revenue!==null)row.revenue+=allocated[index];rows.set(key,row);
+      }
+    }
+    return [...rows.values()].filter(row=>row.quantity!==0||row.revenue===null||row.revenue!==0);
+  }
+  root.greenvillePaymentReporting={summarize,revenueEvents,refundTotals,expenseEvents,dayKey,inPeriod,knownCost,missingCostProducts};
+  if(typeof module!=='undefined')module.exports={summarize,revenueEvents,refundTotals,expenseEvents,dayKey,inPeriod,knownCost,missingCostProducts};
 })(typeof globalThis!=='undefined'?globalThis:this);
