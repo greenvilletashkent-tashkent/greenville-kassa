@@ -2009,7 +2009,7 @@ function renderProductGrid(){
     || (p.barcode||'').toLowerCase().includes(q));
   /* Товар, пробитый сканером, показываем первым и с пометкой «штрихкод»,
      даже если у него нет остатка или он не попал в категорию. */
-  const scanned = q ? DB.products.find(p=> p.id === window.__gvScannedId) : null;
+  const scanned = q ? DB.products.find(p=> !p.deleted && p.id === window.__gvScannedId) : null;
   if(scanned && !list.some(p=>p.id===scanned.id)) list = [scanned, ...list];
 
   // категория «Услуги» или поиск по названию услуги — показываем только услуги
@@ -2130,7 +2130,7 @@ function bindMatchRows(box){
 
 function addToCart(id){
   const p = DB.products.find(x=>x.id===id);
-  if(!p) return;
+  if(!p || p.deleted) return;
   /* товар можно продавать даже если он уже в минусе или его нет в остатке:
      склад позволит уйти в минус, потом делаете приход */
   const line = cart.find(c=>c.id===id);
@@ -2263,15 +2263,17 @@ function renderCart(){
           <div class="ci-total">${i.price?fmt(i.price*i.qty):'—'}</div>
         </div>`;
       }
-      const left = (DB.products.find(x=>x.id===i.id)||{}).stock;
+      const catalogProduct = DB.products.find(x=>String(x.id)===String(i.id));
+      const left = (catalogProduct||{}).stock;
       const warn = (typeof left === 'number' && i.qty > left)
         ? `<div class="ci-warn">${left<0?`остаток ${left} шт`:`на складе ${left} шт`} — уйдёт в минус</div>` : '';
+      const catalogWarning=(!catalogProduct||catalogProduct.deleted)?'<div class="ci-warn">Товар недоступен в каталоге. Проверьте чек.</div>':catalogProduct.price!==i.price?'<div class="ci-warn">Цена в каталоге изменилась; в чеке сохранена прежняя цена.</div>':'';
       return `<div class="ci">
         <div class="ci-img">${imgTag(i)}</div>
         <div class="ci-info">
           <div class="ci-name">${i.name}</div>
           <div class="ci-price">${fmt(i.price)}</div>
-          ${warn}
+          ${warn}${catalogWarning}
         </div>
         <div class="ci-qty">
           <button data-minus="${i.id}">−</button><span>${i.qty}</span><button data-plus="${i.id}">+</button>
@@ -2382,6 +2384,12 @@ function clampMoney(v, total){
 }
 
 function renderPos(){ renderCatChips(); renderProductGrid(); renderCart(); renderHoldList(); }
+function refreshConfirmedCatalog(){
+  const byId=new Map((DB.products||[]).map(p=>[String(p.id),p]));
+  for(const item of cart){if(item.isService)continue;const p=byId.get(String(item.id));if(p&&!p.deleted){item.name=p.name;item.img=p.img;item.emoji=p.emoji;item.stock=p.stock;}}
+  window.DB=DB;
+  renderInventory();renderPos();
+}
 
 async function checkout(){
   if(window.__gvCloudVerificationPending){toast('Ожидается проверка соединения и очереди чеков',true);return;}
@@ -3045,7 +3053,7 @@ function renderInventory(){
         if(!result || !result.ok){toast((result&&result.msg)||'Нет подтверждения сервера. Товар не удалён.',true);return;}
         DB.products=DB.products.filter(x=>String(x.id)!==String(current.id));window.DB=DB;
         try{localStorage.setItem('greenville_pos_v1',JSON.stringify(DB));}catch(e){}
-        renderInventory();renderPos();toast('Удаление подтверждено сервером');
+        refreshConfirmedCatalog();toast('Удаление подтверждено сервером');
       }catch(e){toast('Нет подтверждения сервера. Проверьте каталог перед повтором.',true);}
       finally{b.disabled=false;}
     }
@@ -3693,7 +3701,7 @@ async function saveProduct(){
       if(JSON.stringify(current)===captured)closeModals();
       else toast('Товар сохранён; новые изменения в форме ещё не сохранены.',true);
     }
-    renderInventory();if(document.getElementById('view-pos').classList.contains('active'))renderPos();
+    refreshConfirmedCatalog();
     toast('Товар подтверждён сервером');
   }catch(e){toast('Нет подтверждения сервера. Проверьте соединение и повторите.',true);}
   finally{productSaving=false;}
@@ -5499,12 +5507,12 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
      отдельным коротким запросом и кладёт его в каталог. */
   let catBusy = false;
   window.cloudSyncCatalog = function(){
-    if(!conf || !token || catBusy) return Promise.resolve(false);
+    if(window.__gvExperimentalCheckout || !conf || !token || catBusy) return Promise.resolve(false);
     catBusy = true;
     const catalogEpoch=window.__gvProductWriteEpoch||0;
     return api('GET', '/api/catalog').then(o=>{
       catBusy = false;
-      if(window.__gvProductWriteActive || catalogEpoch!==(window.__gvProductWriteEpoch||0))return false;
+      if(window.__gvExperimentalCheckout || window.__gvProductWriteActive || catalogEpoch!==(window.__gvProductWriteEpoch||0))return false;
       if(!o || !o.ok || !Array.isArray(o.products)) return false;
       let n = 0;
       try{ n = (typeof DB !== 'undefined' && DB && Array.isArray(DB.products)) ? DB.products.length : 0; }catch(e){ n = 0; }
@@ -5649,18 +5657,21 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             }catch(error){if(committed){window.__gvCartCommitConflict=true;toast('Чек сохранён в очереди. Проверьте очередь и очистите корзину.',true);}else toast('Не удалось сохранить отложенный чек: '+error.message,true);return null;}
             finally{saving=false;}
           };
-          window.__gvExperimentalSync=async()=>{
+          let catalogSyncTail=Promise.resolve();
+          window.__gvExperimentalSync=()=>{
+            const job=catalogSyncTail.catch(()=>{}).then(async()=>{
             await outbox.flush(transport);
             const o=await api('GET','/api/experimental/state');
             if(o&&o.ok&&o.db){
               DB=o.db;
               if(CURRENT && o.role && CURRENT.role!==o.role){CURRENT.role=o.role;role=o.role;applyRole();if(o.role!=='admin')go('pos');}
-              try{localStorage.setItem('greenville_pos_v1',JSON.stringify(DB));}catch(e){}renderPos();
+              try{localStorage.setItem('greenville_pos_v1',JSON.stringify(DB));}catch(e){}refreshConfirmedCatalog();
             }
             const cash=await api('GET','/api/experimental/cash');window.__gvCashHistory=cash&&cash.ok?cash:null;
             const n=await updateQueueStatus();
             paint(n?'off':'ok',n?'Ожидают отправки: '+n:'Общая база');
             return !!(o && o.ok && o.db);
+            });catalogSyncTail=job;return job;
           };
           window.__gvTelegramReview=async()=>{
             if(!CURRENT || CURRENT.role!=='admin')return;
@@ -5817,8 +5828,8 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
               const product={...data,id:current?String(current.id):crypto.randomUUID()};
               const change={operationId:crypto.randomUUID(),cashierId:String(CURRENT.id),kind:'product_save',revision:current?(current.catalogRevision||0):0,product};
               await outbox.add(change);await updateQueueStatus();closeModals();
-              toast('Карточка сохранена и ожидает подтверждения');await window.__gvExperimentalSync();
-              if(!(await outbox.list()).some(e=>e.operationId===change.operationId))toast('Карточка подтверждена сервером');
+              toast('Карточка сохранена и ожидает подтверждения');const refreshed=await window.__gvExperimentalSync();
+              if(!(await outbox.list()).some(e=>e.operationId===change.operationId))toast(refreshed?'Карточка подтверждена сервером':'Карточка подтверждена, но каталог не обновлён. Проверьте соединение.',!refreshed);
             }catch(error){toast('Не удалось сохранить карточку: '+error.message,true);}
             finally{saving=false;}
           };
@@ -5840,8 +5851,8 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             saving=true;
             try{
               const change={operationId:crypto.randomUUID(),cashierId:String(CURRENT.id),kind:'product_archive',productId:String(id),revision:p.catalogRevision||0};
-              await outbox.add(change);await updateQueueStatus();toast('Изменение каталога ожидает подтверждения');await window.__gvExperimentalSync();
-              if(!(await outbox.list()).some(e=>e.operationId===change.operationId))toast('Товар убран из каталога');
+              await outbox.add(change);await updateQueueStatus();toast('Изменение каталога ожидает подтверждения');const refreshed=await window.__gvExperimentalSync();
+              if(!(await outbox.list()).some(e=>e.operationId===change.operationId))toast(refreshed?'Товар убран из каталога':'Удаление подтверждено, но каталог не обновлён. Проверьте соединение.',!refreshed);
             }catch(error){toast('Не удалось сохранить изменение: '+error.message,true);}
             finally{saving=false;}
           };
