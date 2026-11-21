@@ -73,7 +73,10 @@ function persistWithTelegram(kind,operation,actor){
   return value=>{
     if(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_ENABLED==='1' && process.env.TELEGRAM_TEST_ONLY!=='1'){
       try{telegramNotifications.enqueue(value,telegramNotifications.buildEvent(kind,operation,value,actor));}
-      catch(_){console.error('Не удалось подготовить уведомление Telegram');}
+      catch(_){
+        console.error('Не удалось подготовить уведомление Telegram');
+        try{const id='notification_error:'+kind+':'+operation.operationId;value.telegramOutbox=value.telegramOutbox||[];if(Array.isArray(value.telegramOutbox)&&!value.telegramOutbox.some(e=>e.id===id))value.telegramOutbox.push({id,eventId:id,type:'notification_error',createdAt:new Date().toISOString(),text:'Не удалось сформировать уведомление. Проверьте операцию в кассе: '+operation.operationId,status:'uncertain',attempts:0});}catch(_){}
+      }
     }
     return persistExperimentalDb(value);
   };
@@ -492,14 +495,14 @@ const server = http.createServer(async (req, res)=>{
     if(experimentalReceiptLedger && p === '/api/experimental/refund' && req.method === 'POST'){
       const b=await readBody(req,1024*1024);
       if(me.role!=='admin' || !b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Только администратор'});
-      try{const result=experimentalReceiptLedger.refundPayment(Object.assign({},DB,{operations:DB.operations||{}}),b.receipt,persistExperimentalDb,me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});}
+      try{const result=experimentalReceiptLedger.refundPayment(Object.assign({},DB,{operations:DB.operations||{}}),b.receipt,persistWithTelegram('refund',b.receipt,me),me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});}
       catch(e){const stale=e.message.startsWith('Операция изменилась.');return json(res,e.storageError?503:409,{ok:false,code:stale?'STALE_FINANCIAL_REVISION':'FINANCIAL_OPERATION_REJECTED',msg:e.storageError?'Не удалось сохранить операцию':stale?'Данные продажи изменились. Обновите информацию.':'Операция отклонена. Проверьте данные и доступные суммы.'});}
     }
     if(experimentalReceiptLedger && p === '/api/experimental/debt-correction' && req.method === 'POST'){
       const b=await readBody(req,1024*1024);
       if(me.role!=='admin' || !b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Только администратор'});
       const state=Object.assign({},DB,{operations:DB.operations||{}});
-      try{const result=experimentalReceiptLedger.correctDebt(state,b.receipt,persistExperimentalDb,me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});}
+      try{const result=experimentalReceiptLedger.correctDebt(state,b.receipt,persistWithTelegram('debt_correction',b.receipt,me),me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});}
       catch(e){const stale=e.message.startsWith('Операция изменилась.');return json(res,e.storageError?503:409,{ok:false,code:stale?'STALE_FINANCIAL_REVISION':'FINANCIAL_OPERATION_REJECTED',msg:e.storageError?'Не удалось сохранить операцию':stale?'Данные продажи изменились. Обновите информацию.':'Операция отклонена. Проверьте данные и доступные суммы.'});}
     }
 
@@ -508,7 +511,7 @@ const server = http.createServer(async (req, res)=>{
       if(!b.receipt || String(b.receipt.cashierId || '')!==String(me.id)) return json(res,403,{ok:false,msg:'Операция принадлежит другому сотруднику'});
       const state=Object.assign({}, DB, {operations:DB.operations || {}});
       try{
-        const result=experimentalReceiptLedger.changeReceipt(state,b.receipt,b.receipt.kind==='pay'?persistWithTelegram('sale',b.receipt,me):persistExperimentalDb,me);
+        const result=experimentalReceiptLedger.changeReceipt(state,b.receipt,b.receipt.kind==='pay'?persistWithTelegram('sale',b.receipt,me):['void','restore','edit'].includes(b.receipt.kind)?persistWithTelegram('sale_change',b.receipt,me):persistExperimentalDb,me);
         DB=result.state;if(!result.duplicate)REV++;
         return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});
       }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}

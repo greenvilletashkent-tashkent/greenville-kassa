@@ -9,14 +9,22 @@ function paymentLines(s){
  if(s.payments)return Object.entries(methods).filter(([k])=>s.payments[k]>0).map(([k,v])=>v+': '+money(s.payments[k]));
  return ['Оплата: '+String(s.pay||'не указана')];
 }
+function reliableProfit(s){return Number.isSafeInteger(s.profit) && Array.isArray(s.items) && s.items.length>0 && s.items.every(i=>!i.isService && Number.isSafeInteger(i.cost) && i.cost>0);}
 function buildEvent(kind,op,state,actor){
  const sale=state.sales?.find(s=>String(s.id)===String(state.operations?.[op.operationId]?.saleId));
  if(kind==='sale'){
   if(!sale || sale.paid===false)return null;
-  const lines=['Продажа №'+sale.id+' · '+date(sale.paidAt||sale.date),'Сотрудник: '+String(actor.name||actor.id),...(sale.items||[]).map(i=>String(i.name)+' × '+i.qty),'Итого: '+money(sale.total),...paymentLines(sale),'Себестоимость: '+money(sale.cost),'Прибыль: '+money(sale.profit)];
+  const lines=['Продажа №'+sale.id+' · '+date(sale.paidAt||sale.date),'Сотрудник: '+String(actor.name||actor.id),...(sale.items||[]).map(i=>String(i.name)+' × '+i.qty),'Итого: '+money(sale.total),...paymentLines(sale),'Себестоимость: '+money(reliableProfit(sale)?sale.cost:null),'Валовая прибыль: '+money(reliableProfit(sale)?sale.profit:null)];
   if(sale.payments?.debt>0){const customer=(state.customers||[]).find(c=>String(c.id)===String(sale.customerId));lines.push('Новый долг: '+money(sale.payments.debt)+' · '+String(customer?.name||'покупатель не указан'));}
   return {id:'sale:'+op.operationId,text:lines.join('\n')};
  }
+ if(kind==='sale_change' && sale && sale.paid!==false && ['void','restore','edit'].includes(op.kind))return {id:'sale_change:'+op.operationId,text:[({void:'Отмена продажи',restore:'Восстановление продажи',edit:'Исправление продажи'})[op.kind]+' №'+sale.id,'Сотрудник: '+String(actor.name||actor.id),date(sale.updatedAt),'Итого: '+money(sale.total)].join('\n')};
+ if(kind==='expense' && op.action!=='create'){
+  const e=(state.expenses||[]).find(x=>x.id===op.expenseId),h=e?.history?.find(x=>x.operationId===op.operationId);if(!h)return null;
+  return {id:'expense_change:'+op.operationId,text:[op.action==='cancel'?'Отмена расхода':'Исправление расхода','Сотрудник: '+String(actor.name||actor.id),date(h.at),'Было: '+money(h.before.amount)+' · '+h.before.purpose,'Стало: '+(h.after.cancelled?'отменён':money(h.after.amount)+' · '+h.after.purpose)].join('\n')};
+ }
+ if(kind==='refund' && sale){const r=(sale.refunds||[]).find(x=>x.operationId===op.operationId);if(!r)return null;return {id:'refund:'+op.operationId,text:['Возврат по чеку №'+sale.id,'Сотрудник: '+String(actor.name||actor.id),date(r.at),...Object.entries(r.amounts).filter(([,v])=>v>0).map(([k,v])=>methods[k]+': '+money(v)),'Причина: '+r.reason].join('\n')};}
+ if(kind==='debt_correction' && sale){const c=(sale.debtCorrections||[]).find(x=>x.operationId===op.operationId);if(!c)return null;return {id:'debt_correction:'+op.operationId,text:['Исправление оплаты по чеку №'+sale.id,'Сотрудник: '+String(actor.name||actor.id),date(c.at),'Причина: '+c.reason,'Остаток долга: '+money(c.after.debtOutstanding)].join('\n')};}
  if(kind==='expense' && op.action==='create'){
   const e=(state.expenses||[]).find(x=>x.id===op.operationId);if(!e)return null;
   let balance='Неизвестен';try{balance=money(cashRegister(state).balance);}catch(_){}
@@ -50,7 +58,7 @@ function daily(state,day){
  const revenue=events.reduce((n,e)=>n+(e.total||0),0),count=events.reduce((n,e)=>n+(e.eventSign||1),0);
  // Old edits do not carry enough snapshots to recover their original cost.
  const historicalEditUnknown=(state.sales||[]).some(s=>include(s.date) && Number.isFinite(Date.parse(s.updatedAt)) && Date.parse(s.updatedAt)>cutoff);
- const unknownCost=historicalEditUnknown||events.some(x=>x.cost==null||(x.items||[]).some(i=>!i.isService&&i.cost==null)),unknownProfit=unknownCost||events.some(x=>x.profit==null||(x.items||[]).some(i=>i.isService));
+ const unknownCost=historicalEditUnknown||events.some(x=>x.cost==null||(x.items||[]).some(i=>!i.isService&&(!Number.isSafeInteger(i.cost)||i.cost<=0))),unknownProfit=unknownCost||events.some(x=>!reliableProfit(x));
  const cost=unknownCost?null:events.reduce((n,e)=>n+e.cost,0),profit=unknownProfit?null:events.reduce((n,e)=>n+e.profit,0);
  let debt=0,debtUnknown=false;
  for(const s of state.sales||[]){
@@ -63,8 +71,8 @@ function daily(state,day){
   if(!Number.isSafeInteger(value)||value<0)debtUnknown=true;else debt+=value;
  }
  const newDebt=(state.sales||[]).filter(s=>s.paid!==false && include(s.date)).reduce((n,s)=>{const first=(s.debtCorrections||[]).find(c=>c.action==='correct_initial');return n+(first?first.before.payments.debt:(s.payments?.debt||0));},0);
- let cash='Неизвестен';try{const m=cashRegister(state).movements;if(Date.parse(state.cashRegister.openedAt)<=cutoff)cash=money(m.filter(x=>Date.parse(x.at)<=cutoff).reduce((n,x)=>n+x.amount,0))}catch(_){}
- const lines=['Итог за '+day+' на 21:00 (Ташкент)','Выручка: '+money(revenue),'Количество продаж с учётом отмен: '+count,'Себестоимость: '+money(cost),'Валовая прибыль: '+money(profit),'Наличные поступления: '+money(sums.cash),'Терминал: '+money(sums.terminal),'Карта руководителя: '+money(sums.owner_card),'Новые долги: '+money(newDebt),'Погашения долгов (в составе поступлений): '+money(sums.repayments),'Возвраты: '+money(refunds.cash+refunds.terminal+refunds.owner_card),'Расходы: '+money(expenses.reduce((n,e)=>n+e.amount,0)),...expenses.map(e=>e.purpose+': '+money(e.amount)),'Остаток наличных на 21:00: '+cash,'Задолженность на 21:00: '+(debtUnknown?'Неизвестна':money(debt))];
+ let cash='Неизвестен',cashStart='Неизвестен',cashIn='Неизвестны',cashExpenses='Неизвестны',cashOther='Неизвестны';try{const m=cashRegister(state).movements,start=Date.parse(day+'T00:00:00+05:00'),opened=Date.parse(state.cashRegister.openedAt);if(opened<=cutoff){cash=money(m.filter(x=>Date.parse(x.at)<=cutoff).reduce((n,x)=>n+x.amount,0));if(opened<=start)cashStart=money(m.filter(x=>Date.parse(x.at)<start || (x.kind==='opening'&&Date.parse(x.at)===start)).reduce((n,x)=>n+x.amount,0));const dayMoves=m.filter(x=>Date.parse(x.at)>=start&&Date.parse(x.at)<=cutoff);cashIn=money(dayMoves.filter(x=>x.kind==='sale'||x.kind==='debt_payment').reduce((n,x)=>n+x.amount,0));cashExpenses=money(-dayMoves.filter(x=>x.kind.startsWith('expense_')).reduce((n,x)=>n+x.amount,0));cashOther=money(dayMoves.filter(x=>x.kind==='refund'||x.kind==='correction'||(x.kind==='opening'&&opened>start)).reduce((n,x)=>n+x.amount,0));}}catch(_){}
+ const lines=['Итог за '+day+' на 21:00 (Ташкент)','Выручка: '+money(revenue),'Количество продаж с учётом отмен: '+count,'Себестоимость: '+money(cost),'Валовая прибыль: '+money(profit),'Наличные поступления: '+money(sums.cash),'Терминал: '+money(sums.terminal),'Карта руководителя: '+money(sums.owner_card),'Новые долги: '+money(newDebt),'Погашения долгов (в составе поступлений): '+money(sums.repayments),'Возвраты: '+money(refunds.cash+refunds.terminal+refunds.owner_card),'Расходы: '+money(expenses.reduce((n,e)=>n+e.amount,0)),...expenses.map(e=>e.purpose+': '+money(e.amount)),'Наличные на начало дня: '+cashStart,'Наличные от продаж и погашений: '+cashIn,'Расходы из наличной кассы: '+cashExpenses,'Прочие движения наличных: '+cashOther,'Остаток наличных на 21:00: '+cash,'Задолженность на 21:00: '+(debtUnknown?'Неизвестна':money(debt))];
  return {id:'daily:'+day,text:lines.join('\n')};
 }
 function dueDaily(now){const hour=new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tashkent',hour:'2-digit',hourCycle:'h23'}).format(now);return Number(hour)>=21?dayKey(now):null;}
