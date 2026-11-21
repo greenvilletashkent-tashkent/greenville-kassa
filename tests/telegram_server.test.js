@@ -39,6 +39,18 @@ test('Telegram remains disabled by default even when configuration values exist'
  try{let ready=false;for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok){ready=true;break}}catch{}await new Promise(r=>setTimeout(r,50))}assert.ok(ready);await new Promise(r=>setTimeout(r,100));const db=JSON.parse(fs.readFileSync(path.join(dir,'db.json')));assert.equal(db.telegramOutbox,undefined);assert.equal(fs.existsSync(capture),false);}
  finally{proc.kill();await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})}
 });
+test('private reports run alone without sending pending group notifications',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gv-private-only-')),capture=path.join(dir,'transport.jsonl');
+ const seed={products:[],sales:[],customers:[],operations:{},counter:1001,bonusPct:0,telegramOutbox:[{id:'sale:old',type:'sale',text:'Групповая продажа',status:'pending',attempts:0}]};fs.writeFileSync(path.join(dir,'db.json'),JSON.stringify(seed));
+ const sock=net.createServer();await new Promise(r=>sock.listen(0,'127.0.0.1',r));const port=sock.address().port;await new Promise(r=>sock.close(r));
+ const updates=[{update_id:1,message:{from:{id:6718939119},chat:{id:6718939119,type:'private'},text:'/start'}},{update_id:2,message:{from:{id:999},chat:{id:999,type:'private'},text:'Сегодня'}},{update_id:3,message:{from:{id:6718939119},chat:{id:-5394232914,type:'group'},text:'Сегодня'}}];
+ const env={...process.env,ELECTRON_RUN_AS_NODE:'1',DATA_DIR:dir,HOST:'127.0.0.1',PORT:String(port),ADMIN_PASSWORD:'synthetic-only',TELEGRAM_BOT_TOKEN:'fake',TELEGRAM_CHAT_ID:'-5394232914',TELEGRAM_ENABLED:'0',TELEGRAM_REPORTS_ENABLED:'1',TELEGRAM_OWNER_IDS:'6718939119',TELEGRAM_TEST_CAPTURE:capture,TELEGRAM_TEST_UPDATES:JSON.stringify(updates)};
+ const proc=spawn(process.execPath,['--require',path.join(__dirname,'telegram_fetch_stub.js'),'server.js'],{cwd:path.join(__dirname,'..'),env,windowsHide:true,stdio:'ignore'});
+ try{
+  let delivered=false;for(let i=0;i<350;i++){const d=JSON.parse(fs.readFileSync(path.join(dir,'db.json'))),reply=(d.telegramOutbox||[]).find(e=>e.eventId==='telegram_update:1');if(reply?.status==='sent'){assert.equal(d.telegramUpdateOffset,4);assert.equal(d.telegramOutbox.find(e=>e.id==='sale:old').status,'pending');assert.ok(!d.telegramOutbox.some(e=>e.eventId==='telegram_update:2'||e.eventId==='telegram_update:3'||e.type==='daily'));delivered=true;break;}await new Promise(r=>setTimeout(r,100));}assert.ok(delivered);
+  const sent=fs.readFileSync(capture,'utf8').trim().split('\n').map(JSON.parse);assert.equal(sent.length,1);assert.equal(sent[0].chat_id,'6718939119');assert.ok(!sent.some(m=>String(m.chat_id)==='-5394232914'));
+ }finally{proc.kill();await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})}
+});
 test('obsolete queue-based test mode cannot send a test message',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gv-telegram-testmode-')),capture=path.join(dir,'transport.jsonl');fs.writeFileSync(path.join(dir,'db.json'),JSON.stringify({products:[{id:'p',name:'Тест',stock:5,cost:5}],sales:[],customers:[],operations:{},counter:1001,bonusPct:0}));
  const sock=net.createServer();await new Promise(r=>sock.listen(0,'127.0.0.1',r));const port=sock.address().port;await new Promise(r=>sock.close(r));

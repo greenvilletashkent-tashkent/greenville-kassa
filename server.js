@@ -854,12 +854,16 @@ server.listen(PORT, HOST, ()=>{
     console.log('ВНИМАНИЕ: пароль администратора не задан — при первом входе используется заводской (admin/admin).');
     console.log('Задайте ADMIN_PASSWORD в настройках хостинга и перезапустите.');
   }
-  if(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_ENABLED==='1'){
+  const normalTelegram=process.env.TELEGRAM_ENABLED==='1' && !!process.env.TELEGRAM_CHAT_ID;
+  const privateTelegram=process.env.TELEGRAM_REPORTS_ENABLED==='1';
+  if(process.env.TELEGRAM_BOT_TOKEN && (normalTelegram || privateTelegram)){
     const {createWorker,telegramSend,telegramGetUpdates}=require('./sync/telegram_worker');
     const telegramReports=require('./sync/telegram_reports'),owners=telegramReports.ownerIds(process.env.TELEGRAM_OWNER_IDS);
     const commit=fn=>{const next=structuredClone(DB);if(!fn(next))return;persistExperimentalDb(next);DB=next;};
-    const testOnly=process.env.TELEGRAM_TEST_ONLY==='1';
-    const worker=createWorker({readState:()=>DB,commit,send:(text,destination,markup)=>telegramSend(process.env.TELEGRAM_BOT_TOKEN,destination||process.env.TELEGRAM_CHAT_ID,text,markup),eligible:e=>!testOnly||e.type==='test',log:message=>console.error(message)});
+    const testOnly=normalTelegram && process.env.TELEGRAM_TEST_ONLY==='1';
+    const reportsActive=!testOnly && (normalTelegram || privateTelegram);
+    const eligible=e=>{if(testOnly)return e.type==='test';if(e.type==='telegram_update')return reportsActive && owners.has(String(e.destination||''));return normalTelegram;};
+    const worker=createWorker({readState:()=>DB,commit,send:(text,destination,markup)=>telegramSend(process.env.TELEGRAM_BOT_TOKEN,destination||process.env.TELEGRAM_CHAT_ID,text,markup),eligible,log:message=>console.error(message)});
     try{worker.recover();}catch(_){console.error('Не удалось восстановить очередь Telegram');}
     let polling=false;
     const poll=async()=>{if(polling||!owners.size)return;polling=true;try{
@@ -871,10 +875,10 @@ server.listen(PORT, HOST, ()=>{
     }catch(_){console.error('Не удалось получить команды Telegram');}finally{polling=false;}};
     const run=()=>{
       try{
-        if(!testOnly)commit(state=>telegramNotifications.scheduleDaily(state,new Date()));
+        if(normalTelegram && !testOnly)commit(state=>telegramNotifications.scheduleDaily(state,new Date()));
       }catch(_){console.error('Не удалось подготовить дневной отчёт Telegram');}
       worker.tick().catch(()=>console.error('Ошибка обработки очереди Telegram'));
-      if(!testOnly)void poll();
+      if(reportsActive)void poll();
     };
     setInterval(run,15000).unref();run();
   }
