@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='gv-cost-browser-') as profile:
         for width in (360,390,1440):
             dev.call('Emulation.setDeviceMetricsOverride',{'width':width,'height':844,'deviceScaleFactor':1,'mobile':width<500})
             dev.evaluate("""CURRENT={name:'Test',role:'admin'};applyRole();DB.products=[{id:'p',name:'Без закупки',sku:'MISSING',barcode:'123456',price:100,cost:null,stock:3,cat:'Тест'},{id:'z',name:'Ноль',sku:'ZERO',barcode:'789',price:100,cost:0,stock:2,cat:'Тест'}];DB.sales=[{id:'s',date:'2026-11-21T08:00:00Z',paid:true,total:200,subtotal:200,cost:null,profit:null,cashier:'Test',items:[{id:'p',name:'Без закупки',qty:2,price:100,cost:null}]}];DB.customers=[];go('products');document.querySelector('[data-filter="missing-cost"]').click();""")
-            assert dev.evaluate("document.querySelector('#invBody').innerText.includes('MISSING') && document.querySelector('#invBody').innerText.includes('123456') && !document.querySelector('#invBody').innerText.includes('ZERO')")
+            assert dev.evaluate("document.querySelector('#invBody').innerText.includes('MISSING') && document.querySelector('#invBody').innerText.includes('123456') && document.querySelector('#invBody').innerText.includes('ZERO')")
             dev.evaluate("go('reports');reportPeriod='all';renderReports();document.querySelector('#findMissingCosts').click()")
             assert dev.evaluate("document.querySelector('#missingCostReport').innerText.includes('MISSING') && document.querySelector('#missingCostReport').innerText.includes('200')")
             dev.evaluate("document.querySelector('[data-missing-edit]').click()")

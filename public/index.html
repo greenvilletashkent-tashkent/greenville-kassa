@@ -2993,7 +2993,7 @@ function renderInventory(){
   let list = DB.products.filter(p=>!p.deleted);
   if(invFilter==='low') list = list.filter(p=>p.stock>0 && p.stock<=5);
   if(invFilter==='out') list = list.filter(p=>p.stock<=0);
-  if(invFilter==='missing-cost') list = list.filter(p=>!window.greenvillePaymentReporting.knownCost(p.cost));
+  if(invFilter==='missing-cost') list = list.filter(p=>p.cost===0 || !window.greenvillePaymentReporting.knownCost(p.cost));
   if(q) list = list.filter(p=> p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q));
 
   document.getElementById('invBody').innerHTML = list.map(p=>{
