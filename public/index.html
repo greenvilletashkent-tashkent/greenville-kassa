@@ -1122,6 +1122,7 @@ input,select{font:inherit;color:inherit}
     </button>
     <button class="nav-item" id="debtNav" type="button">Долги</button>
     <button class="nav-item" id="cashNav" type="button">Наличная касса</button>
+    <button class="nav-item admin-only" id="telegramReviewNav" type="button">Проверка Telegram</button>
     <div class="nav-label mt">Управление</div>
     <button class="nav-item" data-view="shifts">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
@@ -1158,6 +1159,7 @@ input,select{font:inherit;color:inherit}
   <button id="mobileReports" class="admin-only" hidden>Отчёты</button>
   <button id="mobileDebt" type="button" style="min-height:48px;padding:0 10px;color:#155b38;font-weight:700">Долги</button>
   <button id="mobileCash" type="button" style="min-height:48px;padding:0 10px;color:#155b38;font-weight:700">Касса</button>
+  <button id="mobileTelegramReview" class="admin-only" type="button" style="min-height:48px;padding:0 10px">Telegram</button>
   <div class="tb-right">
     <div class="clock" id="clock">--:--</div>
     <button class="user" id="btnUser" title="Аккаунт">
@@ -4524,6 +4526,7 @@ function init(){
   document.getElementById('debtNav').onclick=()=>{if(window.__gvOpenDebts)void window.__gvOpenDebts();else toast('Список долгов недоступен',true);};
   document.getElementById('mobileDebt').onclick=()=>{if(window.__gvOpenDebts)void window.__gvOpenDebts();else toast('Список долгов недоступен',true);};
   for(const id of ['cashNav','mobileCash'])document.getElementById(id).onclick=()=>{if(window.__gvOpenCash)void window.__gvOpenCash();else toast('Наличная касса недоступна',true);};
+  for(const id of ['telegramReviewNav','mobileTelegramReview'])document.getElementById(id).onclick=()=>{if(window.__gvTelegramReview)void window.__gvTelegramReview();else toast('Telegram недоступен',true);};
   document.getElementById('posSearch').onkeydown = e=>{
     if(e.key!=='Enter') return;
     clearTimeout(searchTimer);
@@ -5646,6 +5649,18 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
             const n=await updateQueueStatus();
             paint(n?'off':'ok',n?'Ожидают отправки: '+n:'Общая база');
             return !!(o && o.ok && o.db);
+          };
+          window.__gvTelegramReview=async()=>{
+            if(!CURRENT || CURRENT.role!=='admin')return;
+            const data=await api('GET','/api/experimental/telegram-review');if(!data||!data.ok){toast('Не удалось получить список уведомлений',true);return;}
+            const wrap=document.createElement('div');wrap.style.cssText='position:fixed;inset:0;z-index:999999;background:#0009;padding:12px;overflow:auto';const panel=document.createElement('section');panel.style.cssText='background:white;color:#183328;max-width:680px;margin:auto;padding:20px;border-radius:12px';wrap.append(panel);document.body.append(wrap);
+            const h=document.createElement('h2');h.textContent='Telegram: требует проверки';panel.append(h);
+            if(data.testMode){const b=document.createElement('button'),operationId=crypto.randomUUID();b.textContent='Отправить одно тестовое сообщение';b.style.minHeight='48px';b.onclick=async()=>{if(!confirm('Отправить одно тестовое сообщение в настроенную группу?'))return;b.disabled=true;const result=await api('POST','/api/experimental/telegram-test',{confirm:true,operationId});if(result&&result.ok)toast('Тестовое сообщение поставлено в очередь');else{b.disabled=false;toast('Не удалось подтвердить постановку в очередь. Повтор используйте только в этом окне.',true);}};panel.append(b);}
+            if(!data.notifications.length){const p=document.createElement('p');p.textContent='Нет уведомлений, требующих проверки.';panel.append(p);}
+            for(const item of data.notifications){const box=document.createElement('article'),info=document.createElement('pre');info.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere';info.textContent='Дата: '+(item.createdAt||'неизвестна')+'\nТип: '+item.type+'\nID: '+item.id+'\n\n'+item.text;box.append(info);
+              for(const [label,decision] of [['Отметить доставленным','delivered'],['Повторить отправку','retry']]){const b=document.createElement('button');b.textContent=label;b.style.cssText='min-height:48px;padding:8px;margin:4px';b.onclick=async()=>{if(!confirm(decision==='retry'?'Telegram мог уже доставить сообщение. Повтор может создать дубль. Продолжить?':'Подтвердите, что сообщение действительно доставлено.'))return;b.disabled=true;const result=await api('POST','/api/experimental/telegram-review',{id:item.id,decision,decisionId:crypto.randomUUID()});if(result&&result.ok)box.remove();else{b.disabled=false;toast('Результат не подтверждён: обновите список.',true);}};box.append(b);}panel.append(box);
+            }
+            const close=document.createElement('button');close.textContent='Закрыть';close.style.minHeight='48px';close.onclick=()=>wrap.remove();panel.append(close);
           };
           window.__gvOpenCash=()=>window.greenvilleCashDialog(async()=>{
             const cash=await api('GET','/api/experimental/cash'),expenses=await api('GET','/api/experimental/expenses');

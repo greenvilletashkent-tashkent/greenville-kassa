@@ -15,6 +15,7 @@ const http = require('http');
 const fs   = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const telegramNotifications = require('./sync/telegram_notifications');
 // The protected protocol is the default. The opt-out is for isolated regression tests.
 const experimentalReceiptLedger = process.env.GREENVILLE_EXPERIMENTAL_V3 === '0'
   ? null : require('./sync/receipt_ledger');
@@ -64,6 +65,16 @@ function persistExperimentalDb(value){
     if(fd!==null)try{fs.closeSync(fd);}catch(e){}
     if(!renamed)try{fs.unlinkSync(tmp);}catch(e){}
   }
+}
+
+function persistWithTelegram(kind,operation,actor){
+  return value=>{
+    if(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_ENABLED==='1' && process.env.TELEGRAM_TEST_ONLY!=='1'){
+      try{telegramNotifications.enqueue(value,telegramNotifications.buildEvent(kind,operation,value,actor));}
+      catch(_){console.error('Не удалось подготовить уведомление Telegram');}
+    }
+    return persistExperimentalDb(value);
+  };
 }
 
 /* пароль администратора для первого входа: только из окружения (не из .env-файла) */
@@ -404,7 +415,7 @@ const server = http.createServer(async (req, res)=>{
       if(!b.receipt || String(b.receipt.cashierId || '') !== String(me.id)) return json(res, 403, {ok:false, msg:'Чек принадлежит другому сотруднику'});
       const state = Object.assign({}, DB, {operations:DB.operations || {}});
       try{
-        const result = experimentalReceiptLedger.acceptReceipt(state, b.receipt, persistExperimentalDb, me);
+        const result = experimentalReceiptLedger.acceptReceipt(state, b.receipt, persistWithTelegram('sale',b.receipt,me), me);
         DB = result.state;
         if(!result.duplicate) REV++;
         return json(res, 200, {ok:true, duplicate:result.duplicate, saleId:result.saleId});
@@ -430,8 +441,31 @@ const server = http.createServer(async (req, res)=>{
     if(experimentalReceiptLedger && p === '/api/experimental/expense' && req.method === 'POST'){
       const b=await readBody(req,1024*1024);
       if(!b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Операция принадлежит другому сотруднику'});
-      try{const result=experimentalReceiptLedger.changeExpense(Object.assign({},DB,{operations:DB.operations||{}}),b.receipt,persistExperimentalDb,me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,expenseId:result.expenseId});}
+      try{const result=experimentalReceiptLedger.changeExpense(Object.assign({},DB,{operations:DB.operations||{}}),b.receipt,persistWithTelegram('expense',b.receipt,me),me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,expenseId:result.expenseId});}
       catch(e){return json(res,e.message==='forbidden'?403:e.storageError?503:409,{ok:false,msg:e.message==='forbidden'?'Только администратор может изменить расход':'Расход не сохранён. Проверьте данные или обновите список.'});}
+    }
+    if(experimentalReceiptLedger && p === '/api/experimental/telegram-status' && req.method === 'GET'){
+      if(me.role!=='admin')return json(res,403,{ok:false,msg:'Только администратор'});
+      const counts={pending:0,sending:0,sent:0,uncertain:0};for(const e of DB.telegramOutbox||[])if(Object.hasOwn(counts,e.status))counts[e.status]++;
+      return json(res,200,{ok:true,enabled:!!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_ENABLED==='1'),counts});
+    }
+    if(experimentalReceiptLedger && p === '/api/experimental/telegram-review' && req.method === 'GET'){
+      if(me.role!=='admin')return json(res,403,{ok:false,msg:'Только администратор'});
+      return json(res,200,{ok:true,testMode:process.env.TELEGRAM_ENABLED==='1' && process.env.TELEGRAM_TEST_ONLY==='1' && !!process.env.TELEGRAM_BOT_TOKEN && !!process.env.TELEGRAM_CHAT_ID,notifications:(DB.telegramOutbox||[]).filter(e=>e.status==='uncertain').map(e=>({id:e.id,type:e.type||e.id.split(':')[0],createdAt:e.createdAt||null,text:e.text}))});
+    }
+    if(experimentalReceiptLedger && p === '/api/experimental/telegram-review' && req.method === 'POST'){
+      if(me.role!=='admin')return json(res,403,{ok:false,msg:'Только администратор'});
+      const body=await readBody(req,1024*1024);
+      try{const next=structuredClone(DB);const changed=telegramNotifications.resolveUncertain(next,body.id,body.decision,me,body.decisionId);if(changed){persistExperimentalDb(next);DB=next;}return json(res,200,{ok:true,duplicate:!changed});}
+      catch(e){return json(res,e.storageError?503:409,{ok:false,msg:'Уведомление изменилось или не может быть обработано'});}
+    }
+    if(experimentalReceiptLedger && p === '/api/experimental/telegram-test' && req.method === 'POST'){
+      if(me.role!=='admin')return json(res,403,{ok:false,msg:'Только администратор'});
+      if(process.env.TELEGRAM_ENABLED!=='1'||process.env.TELEGRAM_TEST_ONLY!=='1'||!process.env.TELEGRAM_BOT_TOKEN||!process.env.TELEGRAM_CHAT_ID)return json(res,409,{ok:false,msg:'Тестовый режим Telegram не включён'});
+      const body=await readBody(req,1024*1024);
+      if(!body.confirm || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.operationId||''))return json(res,400,{ok:false,msg:'Требуется подтверждение'});
+      try{const next=structuredClone(DB);const existing=(next.telegramOutbox||[]).find(e=>e.type==='test');if(existing && existing.eventId!=='test:'+body.operationId)return json(res,409,{ok:false,msg:'Тестовое сообщение уже было поставлено в очередь'});const added=telegramNotifications.enqueue(next,{id:'test:'+body.operationId,text:'GREENVILLE Kassa: тестовое уведомление по запросу администратора.'});if(added){persistExperimentalDb(next);DB=next;}return json(res,200,{ok:true,duplicate:!added});}
+      catch(e){return json(res,e.storageError?503:409,{ok:false,msg:'Не удалось сохранить тестовое уведомление'});}
     }
     if(experimentalReceiptLedger && p === '/api/experimental/debts' && req.method === 'GET'){
       const debts=(DB.sales||[]).filter(s=>s.payments && (s.payments.debt>0 || (s.debtPayments||[]).length || (s.debtCorrections||[]).some(c=>(c.before?.payments?.debt||0)>0))).map(s=>{
@@ -444,7 +478,7 @@ const server = http.createServer(async (req, res)=>{
       const b=await readBody(req,1024*1024);
       if(!b.receipt || String(b.receipt.cashierId||'')!==String(me.id))return json(res,403,{ok:false,msg:'Операция принадлежит другому сотруднику'});
       const state=Object.assign({},DB,{operations:DB.operations||{}});
-      try{const result=experimentalReceiptLedger.repayDebt(state,b.receipt,persistExperimentalDb,me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});}
+      try{const result=experimentalReceiptLedger.repayDebt(state,b.receipt,persistWithTelegram('debt_payment',b.receipt,me),me);DB=result.state;if(!result.duplicate)REV++;return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});}
       catch(e){const stale=e.message.startsWith('Операция изменилась.');return json(res,e.storageError?503:409,{ok:false,code:stale?'STALE_FINANCIAL_REVISION':'FINANCIAL_OPERATION_REJECTED',msg:e.storageError?'Не удалось сохранить операцию':stale?'Данные продажи изменились. Обновите информацию.':'Операция отклонена. Проверьте данные и доступные суммы.'});}
     }
     if(experimentalReceiptLedger && p === '/api/experimental/refund' && req.method === 'POST'){
@@ -466,7 +500,7 @@ const server = http.createServer(async (req, res)=>{
       if(!b.receipt || String(b.receipt.cashierId || '')!==String(me.id)) return json(res,403,{ok:false,msg:'Операция принадлежит другому сотруднику'});
       const state=Object.assign({}, DB, {operations:DB.operations || {}});
       try{
-        const result=experimentalReceiptLedger.changeReceipt(state,b.receipt,persistExperimentalDb,me);
+        const result=experimentalReceiptLedger.changeReceipt(state,b.receipt,b.receipt.kind==='pay'?persistWithTelegram('sale',b.receipt,me):persistExperimentalDb,me);
         DB=result.state;if(!result.duplicate)REV++;
         return json(res,200,{ok:true,duplicate:result.duplicate,saleId:result.saleId});
       }catch(error){return json(res,error.storageError?503:409,{ok:false,msg:error.message});}
@@ -811,5 +845,29 @@ server.listen(PORT, HOST, ()=>{
   if(!CLOUD_PASS && !(AUTH.staff||[]).length){
     console.log('ВНИМАНИЕ: пароль администратора не задан — при первом входе используется заводской (admin/admin).');
     console.log('Задайте ADMIN_PASSWORD в настройках хостинга и перезапустите.');
+  }
+  if(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID && process.env.TELEGRAM_ENABLED==='1'){
+    const {createWorker,telegramSend,telegramGetUpdates}=require('./sync/telegram_worker');
+    const telegramReports=require('./sync/telegram_reports'),owners=telegramReports.ownerIds(process.env.TELEGRAM_OWNER_IDS);
+    const commit=fn=>{const next=structuredClone(DB);if(!fn(next))return;persistExperimentalDb(next);DB=next;};
+    const testOnly=process.env.TELEGRAM_TEST_ONLY==='1';
+    const worker=createWorker({readState:()=>DB,commit,send:(text,destination,markup)=>telegramSend(process.env.TELEGRAM_BOT_TOKEN,destination||process.env.TELEGRAM_CHAT_ID,text,markup),eligible:e=>!testOnly||e.type==='test',log:message=>console.error(message)});
+    try{worker.recover();}catch(_){console.error('Не удалось восстановить очередь Telegram');}
+    let polling=false;
+    const poll=async()=>{if(polling||!owners.size)return;polling=true;try{
+      const updates=await telegramGetUpdates(process.env.TELEGRAM_BOT_TOKEN,DB.telegramUpdateOffset||0);
+      for(const update of updates){if(!Number.isSafeInteger(update.update_id))continue;commit(state=>{
+        if(update.update_id<(state.telegramUpdateOffset||0))return false;
+        telegramReports.handleUpdate(state,update,owners,new Date(),telegramNotifications.enqueue);state.telegramUpdateOffset=update.update_id+1;return true;
+      });}
+    }catch(_){console.error('Не удалось получить команды Telegram');}finally{polling=false;}};
+    const run=()=>{
+      try{
+        if(!testOnly)commit(state=>telegramNotifications.scheduleDaily(state,new Date()));
+      }catch(_){console.error('Не удалось подготовить дневной отчёт Telegram');}
+      worker.tick().catch(()=>console.error('Ошибка обработки очереди Telegram'));
+      if(!testOnly)void poll();
+    };
+    setInterval(run,15000).unref();run();
   }
 });

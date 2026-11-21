@@ -10,6 +10,7 @@ with tempfile.TemporaryDirectory(prefix='gv-restore-') as tmp:
  expected={name:hashlib.sha256((folder/name).read_bytes()).hexdigest() for name in files}
  with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
  env=os.environ.copy();env.update(ELECTRON_RUN_AS_NODE='1',DATA_DIR=str(folder),HOST='127.0.0.1',PORT=str(port));env.pop('ADMIN_PASSWORD',None)
+ for key in ('TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID','TELEGRAM_ENABLED','TELEGRAM_OWNER_IDS','TELEGRAM_TEST_ONLY'):env.pop(key,None)
  node=r'C:\Users\kurba\AppData\Local\Programs\Microsoft VS Code\Code.exe'
  for iteration in range(2):
   proc=subprocess.Popen([node,'server.js'],cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -24,6 +25,6 @@ with tempfile.TemporaryDirectory(prefix='gv-restore-') as tmp:
    else:raise RuntimeError('isolated startup timeout')
    assert r.json()['staff']==len(backup['auth']['staff'])
    assert all(hashlib.sha256((folder/name).read_bytes()).hexdigest()==expected[name] for name in files)
-   assert 'cashRegister' not in json.loads((folder/'db.json').read_bytes())
+   assert json.loads((folder/'db.json').read_bytes()).get('cashRegister')==backup['db'].get('cashRegister')
   finally:proc.terminate();proc.wait(timeout=10)
- print('Snapshot restored and restarted twice without modifying database or users; register remains unopened.')
+ print('Snapshot restored and restarted twice without modifying database, users or cash register.')
