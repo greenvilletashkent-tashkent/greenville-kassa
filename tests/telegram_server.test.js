@@ -40,6 +40,7 @@ test('Telegram remains disabled by default even when configuration values exist'
  finally{proc.kill();await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})}
 });
 test('private reports run alone without sending pending group notifications',async()=>{
+ const started=performance.now();
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'gv-private-only-')),capture=path.join(dir,'transport.jsonl');
  const seed={products:[],sales:[],customers:[],operations:{},counter:1001,bonusPct:0,telegramOutbox:[{id:'sale:old',type:'sale',text:'Групповая продажа',status:'pending',attempts:0}]};fs.writeFileSync(path.join(dir,'db.json'),JSON.stringify(seed));
  const sock=net.createServer();await new Promise(r=>sock.listen(0,'127.0.0.1',r));const port=sock.address().port;await new Promise(r=>sock.close(r));
@@ -47,7 +48,9 @@ test('private reports run alone without sending pending group notifications',asy
  const env={...process.env,ELECTRON_RUN_AS_NODE:'1',DATA_DIR:dir,HOST:'127.0.0.1',PORT:String(port),ADMIN_PASSWORD:'synthetic-only',TELEGRAM_BOT_TOKEN:'fake',TELEGRAM_CHAT_ID:'-5394232914',TELEGRAM_ENABLED:'0',TELEGRAM_REPORTS_ENABLED:'1',TELEGRAM_OWNER_IDS:'6718939119',TELEGRAM_TEST_CAPTURE:capture,TELEGRAM_TEST_UPDATES:JSON.stringify(updates)};
  const proc=spawn(process.execPath,['--require',path.join(__dirname,'telegram_fetch_stub.js'),'server.js'],{cwd:path.join(__dirname,'..'),env,windowsHide:true,stdio:'ignore'});
  try{
-  let delivered=false;for(let i=0;i<350;i++){const d=JSON.parse(fs.readFileSync(path.join(dir,'db.json'))),reply=(d.telegramOutbox||[]).find(e=>e.eventId==='telegram_update:1');if(reply?.status==='sent'){assert.equal(d.telegramUpdateOffset,4);assert.equal(d.telegramOutbox.find(e=>e.id==='sale:old').status,'pending');assert.ok(!d.telegramOutbox.some(e=>e.eventId==='telegram_update:2'||e.eventId==='telegram_update:3'||e.type==='daily'));delivered=true;break;}await new Promise(r=>setTimeout(r,100));}assert.ok(delivered);
+  let delivered=false;for(let i=0;i<45;i++){if(fs.existsSync(capture)&&fs.statSync(capture).size){delivered=true;break;}await new Promise(r=>setTimeout(r,100));}assert.ok(delivered);
+  const elapsed=performance.now()-started;assert.ok(elapsed<5000,'private response exceeded local latency budget');console.log('Synthetic private reply including startup: '+Math.round(elapsed)+' ms');
+  await new Promise(r=>setTimeout(r,150));const d=JSON.parse(fs.readFileSync(path.join(dir,'db.json'))),reply=(d.telegramOutbox||[]).find(e=>e.eventId==='telegram_update:1');assert.equal(reply?.status,'sent');assert.equal(d.telegramUpdateOffset,4);assert.equal(d.telegramOutbox.find(e=>e.id==='sale:old').status,'pending');assert.ok(!d.telegramOutbox.some(e=>e.eventId==='telegram_update:2'||e.eventId==='telegram_update:3'||e.type==='daily'));
   const sent=fs.readFileSync(capture,'utf8').trim().split('\n').map(JSON.parse);assert.equal(sent.length,1);assert.equal(sent[0].chat_id,'6718939119');assert.ok(!sent.some(m=>String(m.chat_id)==='-5394232914'));
  }finally{proc.kill();await new Promise(r=>proc.once('exit',r));fs.rmSync(dir,{recursive:true,force:true})}
 });

@@ -863,23 +863,22 @@ server.listen(PORT, HOST, ()=>{
     const testOnly=normalTelegram && process.env.TELEGRAM_TEST_ONLY==='1';
     const reportsActive=!testOnly && (normalTelegram || privateTelegram);
     const eligible=e=>{if(testOnly)return e.type==='test';if(e.type==='telegram_update')return reportsActive && owners.has(String(e.destination||''));return normalTelegram;};
-    const worker=createWorker({readState:()=>DB,commit,send:(text,destination,markup)=>telegramSend(process.env.TELEGRAM_BOT_TOKEN,destination||process.env.TELEGRAM_CHAT_ID,text,markup),eligible,log:message=>console.error(message)});
+    const worker=createWorker({readState:()=>DB,commit,send:(text,destination,markup)=>telegramSend(process.env.TELEGRAM_BOT_TOKEN,destination||process.env.TELEGRAM_CHAT_ID,text,markup),eligible,log:message=>console.error(message),measure:(ms,queueMs)=>console.info('Telegram report delivery_ms='+ms+' queue_total_ms='+queueMs)});
     try{worker.recover();}catch(_){console.error('Не удалось восстановить очередь Telegram');}
-    let polling=false;
-    const poll=async()=>{if(polling||!owners.size)return;polling=true;try{
+    let polling=false,failures=0;
+    const poll=async()=>{if(polling||!owners.size)return;polling=true;const started=performance.now();let ok=false;try{
       const updates=await telegramGetUpdates(process.env.TELEGRAM_BOT_TOKEN,DB.telegramUpdateOffset||0);
-      for(const update of updates){if(!Number.isSafeInteger(update.update_id))continue;commit(state=>{
+      for(const update of updates){if(!Number.isSafeInteger(update.update_id))continue;let queued=false;commit(state=>{
         if(update.update_id<(state.telegramUpdateOffset||0))return false;
-        telegramReports.handleUpdate(state,update,owners,new Date(),telegramNotifications.enqueue);state.telegramUpdateOffset=update.update_id+1;return true;
-      });}
-    }catch(_){console.error('Не удалось получить команды Telegram');}finally{polling=false;}};
+        const reportStarted=performance.now();queued=telegramReports.handleUpdate(state,update,owners,new Date(),telegramNotifications.enqueue);if(queued)console.info('Telegram report compute_ms='+Math.round(performance.now()-reportStarted));state.telegramUpdateOffset=update.update_id+1;return true;
+      });if(queued)worker.wake();}ok=true;failures=0;
+    }catch(_){failures++;console.error('Не удалось получить команды Telegram');}finally{polling=false;const delay=ok?Math.max(0,1000-(performance.now()-started)):Math.min(30000,1000*2**Math.min(failures-1,5));setTimeout(poll,delay).unref();}};
     const run=()=>{
       try{
         if(normalTelegram && !testOnly)commit(state=>telegramNotifications.scheduleDaily(state,new Date()));
       }catch(_){console.error('Не удалось подготовить дневной отчёт Telegram');}
       worker.tick().catch(()=>console.error('Ошибка обработки очереди Telegram'));
-      if(reportsActive)void poll();
     };
-    setInterval(run,15000).unref();run();
+    setInterval(run,15000).unref();run();if(reportsActive)void poll();
   }
 });
