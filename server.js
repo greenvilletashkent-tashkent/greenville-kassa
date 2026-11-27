@@ -322,6 +322,14 @@ const server = http.createServer(async (req, res)=>{
     if(url.indexOf('/api/health') === 0) return json(res, 200, {ok:true, app:'greenville-pos', ver:1, receiptProtocol:experimentalReceiptLedger?1:0, rev:REV, staff:(AUTH.staff||[]).length, at:new Date().toISOString()});
 
     /* --- вход --- */
+    if(p === '/api/integration/ai/snapshot'){
+      res.setHeader('Cache-Control','no-store');
+      if(req.method !== 'GET')return json(res,405,{ok:false,msg:'Read only'});
+      const integration=require('./sync/ai_readonly');
+      if(!integration.authorized(req.headers.authorization,process.env.GREENVILLE_AI_READ_KEY))return json(res,401,{ok:false,msg:'Access denied'});
+      return json(res,200,{ok:true,...integration.snapshot(DB)});
+    }
+
     if(p === '/api/login' && req.method === 'POST'){
       const k = rateKey(req);
       if(!rateCheck(k)) return json(res, 429, {ok:false, msg:'Слишком много попыток. Подождите 10 минут'});
